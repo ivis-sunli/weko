@@ -1,2 +1,13 @@
+/*
+ * The core stylesheet must be imported from the non-minified build on purpose.
+ * trumbowyg@2.25.2 ships a broken dist/ui/trumbowyg.min.css.map (it contains
+ * CSS instead of JSON while dist/ui/trumbowyg.min.css ends with a
+ * "sourceMappingURL" comment). css-loader tries to parse it as JSON and the
+ * webpack build fails with:
+ *   SyntaxError: Unexpected token '/', "/** Trumbo"... is not valid JSON
+ * The non-minified dist/ui/trumbowyg.css has no sourceMappingURL, and the
+ * production build minifies the bundle with cssnano anyway.
+ */
+@import url("../../node_modules/trumbowyg/dist/ui/trumbowyg.css");
 @import url("../../node_modules/trumbowyg/dist/plugins/colors/ui/trumbowyg.colors.min.css");
 @import url("../../node_modules/trumbowyg/dist/plugins/table/ui/trumbowyg.table.min.css");
