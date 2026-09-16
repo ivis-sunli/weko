@@ -202,12 +202,15 @@ class HarvestSettingView(ModelView):
         try:
             harvesting = HarvestSettings.query.filter_by(
                 id=id).first()
-            harvesting.schedule_enable = eval(request.form['dis_enable_schedule'])
-            harvesting.schedule_frequency = request.form['frequency']
+            harvesting.schedule_enable = \
+                request.form.get('dis_enable_schedule') == 'True'
+            harvesting.schedule_frequency = request.form.get('frequency')
             if harvesting.schedule_frequency == 'weekly':
-                harvesting.schedule_details = request.form['weekly_details']
+                harvesting.schedule_details = \
+                    int(request.form.get('weekly_details') or 0)
             elif harvesting.schedule_frequency == 'monthly':
-                harvesting.schedule_details = request.form['monthly_details']
+                harvesting.schedule_details = \
+                    int(request.form.get('monthly_details') or 0)
             db.session.commit()
         except Exception as e:
             current_app.logger.error(e)
@@ -221,7 +224,8 @@ class HarvestSettingView(ModelView):
             id=request.args.get('id')).first()
         self._template_args['current_schedule'] = {
             'frequency': harvesting.schedule_frequency,
-            'details': harvesting.schedule_details,
+            'details': '' if harvesting.schedule_details is None
+            else str(harvesting.schedule_details),
             'enabled': harvesting.schedule_enable}
         self._template_args['days_of_week'] = [_('Monday'), _('Tuesday'), _('Wednesday'),
                                                _('Thursday'), _(
