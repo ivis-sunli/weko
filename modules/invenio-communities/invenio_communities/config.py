@@ -119,8 +119,10 @@ COMMUNITIES_ALLOWED_TAGS = [
     'blockquote',
     'br',
     'code',
+    'del',
     'div',
     'em',
+    'font',
     'h1',
     'h2',
     'h3',
@@ -131,6 +133,7 @@ COMMUNITIES_ALLOWED_TAGS = [
     'ol',
     'p',
     'pre',
+    's',
     'span',
     'strike',
     'strong',
@@ -151,9 +154,10 @@ COMMUNITIES_ALLOWED_TAGS = [
 
 COMMUNITIES_ALLOWED_ATTRS = {
     '*': ['class', 'style'],
-    'a': ['href', 'title', 'name', 'class', 'rel'],
+    'a': ['href', 'title', 'name', 'class', 'rel', 'target'],
     'abbr': ['title'],
     'acronym': ['title'],
+    'font': ['color', 'face', 'size'],
 }
 """List of allowed attributes used to sanitize HTML output for communities."""
 
