@@ -30,9 +30,9 @@
 {% block edit_form %}
 
   {% call lib.form_tag(None) %}
-      {{ lib.render_form_fields(form, form_opts) }}      
+      {{ lib.render_form_fields(form, form_opts) }}
       {% block toggle_from %}
-      
+
       {% endblock %}
       <div class="form-group">
           <div class="row-line-space"></div>
@@ -66,5 +66,5 @@
 
 {% block tail %}
   {{ super() }}
-  {{ webpack['records_ui_pidstore_identifier_js'] }}
+  {{ webpack['records_ui_pidstore_identifier_js.js'] }}
 {% endblock tail %}
