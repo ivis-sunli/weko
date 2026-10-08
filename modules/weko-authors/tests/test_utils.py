@@ -168,30 +168,37 @@ def test_save_export_url(app):
 
 # def export_authors():
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_utils.py::test_export_authors -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
-def test_export_authors(app,authors,file_instance):
+def test_export_authors(app,authors,file_instance,users,tmp_path):
     scheme_info={"1":{"scheme":"WEKO","url":None},"2":{"scheme":"ORCID","url":"https://orcid.org/##"}}
     header = ["#pk_id","authorNameInfo[0].familyName","authorNameInfo[0].firstName","authorNameInfo[0].language","authorNameInfo[0].nameFormat","authorNameInfo[0].nameShowFlg","authorIdInfo[0].idType","authorIdInfo[0].authorId","authorIdInfo[0].authorIdShowFlg","emailInfo[0].email","is_deleted"]
     label_en=["#WEKO ID","Family Name[0]","Given Name[0]","Language[0]","Name Format[0]","Name Display[0]","Identifier Scheme[0]","Identifier[0]","Identifier Display[0]","Mail Address[0]","Delete Flag"]
     label_jp=["#WEKO ID","姓[0]","名[0]","言語[0]","フォーマット[0]","姓名・言語 表示／非表示[0]","外部著者ID 識別子[0]","外部著者ID[0]","外部著者ID 表示／非表示[0]","メールアドレス[0]","削除フラグ"]
     row_data = [["1","テスト","太郎","ja","familyNmAndNm","Y","ORCID","1234","Y","test.taro@test.org",""],
             ["2","test","smith","en","familyNmAndNm","Y","ORCID","5678","Y","test.smith@test.org",""]]
-    with patch("weko_authors.utils.WekoAuthors.get_all",return_value=authors), \
+    user_id = users[0]['id']
+    temp_file_path = str(tmp_path / 'authors.tsv')
+    current_cache.set(
+        f'{app.config["WEKO_AUTHORS_EXPORT_CACHE_TEMP_FILE_PATH_KEY"]}_{user_id}',
+        temp_file_path)
+    with patch("weko_authors.utils.WekoAuthors.get_by_range",return_value=authors), \
          patch("weko_authors.utils.WekoAuthors.get_identifier_scheme_info",return_value=scheme_info), \
          patch("weko_authors.utils.WekoAuthors.prepare_export_data",return_value=(header,label_en,label_jp,row_data)), \
-         patch("weko_authors.admin.current_cache.get", return_value="/tmp/test.tsv"):
          patch("weko_authors.utils.get_export_url",return_value={}):
-        result = export_authors(1)
+        result = export_authors(user_id)
         assert result
 
     current_app.config.update(WEKO_ADMIN_OUTPUT_FORMAT="csv")
-    cache_url = {"file_uri":"/var/tmp/test_dir"}
-    with patch("weko_authors.utils.get_export_url",return_value=cache_url):
-        result = export_authors(1)
-        assert result == "/var/tmp/test_dir"
+    existing_uri = file_instance.uri
+    cache_url = {"file_uri":existing_uri}
+    with patch("weko_authors.utils.get_export_url",return_value=cache_url), \
+         patch("weko_authors.utils.WekoAuthors.get_by_range",return_value=authors), \
+         patch("weko_authors.utils.WekoAuthors.prepare_export_data",return_value=(header,label_en,label_jp,row_data)):
+        result = export_authors(user_id)
+        assert result == existing_uri
 
     # raise Exception
-    with patch("weko_authors.utils.WekoAuthors.get_all", side_effect=Exception("test_error")):
-        result = export_authors(1)
+    with patch("weko_authors.utils.WekoAuthors.get_by_range", side_effect=Exception("test_error")):
+        result = export_authors(user_id)
         assert result == None
 
 # def check_import_data(file_name: str, file_content: str):

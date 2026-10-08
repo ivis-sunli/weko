@@ -21,7 +21,7 @@ class MockClient():
     def __init__(self):
         self.index_ = self.MockIndex()
         self.return_value=""
-    def index(self,index,body):
+    def index(self,index,body,id=None):
         return self.index_
     def delete(self,index,id):
         pass
@@ -47,7 +47,7 @@ class TestWekoAuthors:
     @pytest.mark.parametrize('base_app',[dict(
         is_search=True
     )],indirect=['base_app'])
-    def test_create(self,app,db,search_index):
+    def test_create(self,app,db,search_index,users):
         id = 1
         search_id = uuid.uuid4()
         with patch("weko_authors.api.Authors.get_sequence",return_value=id):
@@ -113,8 +113,8 @@ class TestWekoAuthors:
     @pytest.mark.parametrize('base_app',[dict(
         is_search=True
     )],indirect=['base_app'])
-    def test_update(self,app,db,search_index,create_author):
-        patch("weko_deposit.tasks.update_items_by_authorInfo.delay")
+    def test_update(self,app,db,search_index,create_author,users,mocker):
+        mocker.patch("weko_deposit.tasks.update_items_by_authorInfo.delay")
         test_data = {
             "authorNameInfo": [{"familyName": "テスト","firstName": "ハナコ","fullName": "","language": "ja-Kana","nameFormat": "familyNmAndNm","nameShowFlg": "true"}],
             "authorIdInfo": [{"idType": "2","authorId": "01234","authorIdShowFlg": "true"}],
@@ -293,10 +293,11 @@ class TestWekoAuthors:
                 ]
             }
         }
-        RecordIndexer().client.search = MagicMock(return_value=search_author)
-        mock_filter_by =patch("weko_authors.api.Authors.query.filter_by")
-        mock_filter_by.return_value.one.return_value = mock_author
-        WekoAuthors.update(author_id,data)
+        search_client = current_search_client._get_current_object()
+        with patch.object(search_client, "search", return_value=search_author), \
+             patch.object(search_client, "update", wraps=search_client.update) as mock_update:
+            WekoAuthors.update(author_id,data)
+            mock_update.assert_called_once()
         db.session.commit()
         author = Authors.query.filter_by(id=author_id).one()
         assert author.json["is_deleted"] == False
@@ -330,9 +331,11 @@ class TestWekoAuthors:
         mock_indexer = RecordIndexer()
         mock_indexer.client = MockClient()
         mock_indexer.client.search = MagicMock(return_value=search_data)
-        patch("weko_authors.api.RecordIndexer", return_value=mock_indexer)
-        patch("weko_authors.api.current_user", return_value=True)
-        WekoAuthors.update(author_id,data)
+        with patch("weko_authors.api.RecordIndexer", return_value=mock_indexer), \
+             patch.object(mock_indexer.client, "index", wraps=mock_indexer.client.index) as mock_index:
+            WekoAuthors.update(author_id,data)
+            mock_indexer.client.search.assert_called_once()
+            mock_index.assert_called_once()
         db.session.commit()
         author = Authors.query.filter_by(id=author_id).one()
         assert author.json["is_deleted"] == False
@@ -1660,7 +1663,7 @@ class TestAuthorIndexer:
 
     def test_bulk_process_authors_sqlalchemy_error(self, app, capsys, mocker):
         indexer = AuthorIndexer(search_client="mock-client")
-        mock_logger = mocker.patch("weko_authors.api.current_app.logger")
+        mock_logger = mocker.patch.object(app, "logger")
 
         with patch.object(indexer, "generate_actions", side_effect=SQLAlchemyError("DB error")):
             result = indexer.bulk_process_authors({})
@@ -1707,7 +1710,7 @@ class TestAuthorIndexer:
 
     def test_bulk_process_authors_generate_actions_keyerror(self, app, capsys, mocker):
         indexer = AuthorIndexer(search_client="mock-client")
-        mock_logger = mocker.patch("weko_authors.api.current_app.logger")
+        mock_logger = mocker.patch.object(app, "logger")
         with patch.object(indexer, "generate_actions", side_effect=KeyError("bad-key")):
             result = indexer.bulk_process_authors({})
             assert result == (0, 0, 0)

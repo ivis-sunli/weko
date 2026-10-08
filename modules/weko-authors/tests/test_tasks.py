@@ -68,7 +68,7 @@ def test_export_all(app):
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_tasks.py::test_01_import_author -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 def test_01_import_author(app):
     with patch("weko_authors.tasks.import_author_to_system"):
-        result = import_author({"status":"", "weko_id":""}, True)
+        result = import_author({"status":"", "weko_id":""}, True, request_info={})
         assert result["status"] == "SUCCESS"
 
 
@@ -76,7 +76,7 @@ def test_01_import_author(app):
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_tasks.py::test_02_import_author -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 def test_02_import_author(app, caplog: LogCaptureFixture):
     with patch("weko_authors.tasks.import_author_to_system",side_effect=SQLAlchemyError("SQLAlchemyError")):
-        result = import_author({"status":"", "weko_id":""}, True)
+        result = import_author({"status":"", "weko_id":""}, True, request_info={})
     info_logs = [record for record in caplog.record_tuples if record[1] == logging.ERROR]
     expected = [('testapp', logging.ERROR, 'SQLAlchemyError')] * 6
     assert info_logs == expected
@@ -87,7 +87,7 @@ def test_02_import_author(app, caplog: LogCaptureFixture):
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_tasks.py::test_03_import_author -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 def test_03_import_author(app, caplog: LogCaptureFixture):
     with patch("weko_authors.tasks.import_author_to_system",side_effect=search.OpenSearchException("OpenSearchException")):
-        result = import_author({"status":"", "weko_id":""}, True)
+        result = import_author({"status":"", "weko_id":""}, True, request_info={})
     info_logs = [record for record in caplog.record_tuples if record[1] == logging.ERROR]
     expected = [('testapp', logging.ERROR, 'OpenSearchException')] * 6
     assert info_logs == expected
@@ -98,7 +98,7 @@ def test_03_import_author(app, caplog: LogCaptureFixture):
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_tasks.py::test_04_import_author -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 def test_04_import_author(app, caplog: LogCaptureFixture):
     with patch("weko_authors.tasks.import_author_to_system",side_effect=TimeoutError("TimeoutError")):
-        result = import_author({"status":"", "weko_id":""}, True)
+        result = import_author({"status":"", "weko_id":""}, True, request_info={})
     info_logs = [record for record in caplog.record_tuples if record[1] == logging.ERROR]
     expected = [('testapp', logging.ERROR, 'TimeoutError')] * 6
     assert info_logs == expected
@@ -109,7 +109,7 @@ def test_04_import_author(app, caplog: LogCaptureFixture):
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_tasks.py::test_05_import_author -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 def test_05_import_author(app, caplog: LogCaptureFixture):
     with patch("weko_authors.tasks.import_author_to_system",side_effect=TimeoutError({"error_id": 123, "message": "An error occurred"})):
-        result = import_author({"status":"", "weko_id":""}, True)
+        result = import_author({"status":"", "weko_id":""}, True, request_info={})
     info_logs = [record for record in caplog.record_tuples if record[1] == logging.ERROR]
     expected = [('testapp', logging.ERROR, "{'error_id': 123, 'message': 'An error occurred'}")] * 6
     assert info_logs == expected

@@ -91,7 +91,7 @@ def test_create_acl_guest(client):
     url = url_for("weko_authors.create")
     res = client.post(url,content_type='text/plain')
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/add")
+    assert res.location == url_for('security.login',next="/api/authors/add", _external=True)
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_create_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -200,7 +200,7 @@ def test_update_author_acl_guest(client):
     url = url_for("weko_authors.update_author")
     res = client.post(url, content_type='plain/text')
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/edit")
+    assert res.location == url_for('security.login',next="/api/authors/edit", _external=True)
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_update_author_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -330,7 +330,7 @@ def test_delete_author_acl_guest(client):
     url = url_for("weko_authors.delete_author")
     res = client.post(url,content_type='plain/text')
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/delete")
+    assert res.location == url_for('security.login',next="/api/authors/delete", _external=True)
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_delete_author_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -355,7 +355,7 @@ def test_delete_author_acl_users(client, users, index, is_permission):
 @pytest.mark.parametrize('base_app',[dict(
     is_search=True
 )],indirect=['base_app'])
-def test_delete_author(client, db,users, search_index, create_author):
+def test_delete_author(client, db,users, search_index, create_author, mocker):
     """
     Test of delete author data.
     :param client: The flask client.
@@ -368,6 +368,7 @@ def test_delete_author(client, db,users, search_index, create_author):
     }
 
 
+    mocker.patch("weko_authors.views.get_count_item_link", return_value=0)
     login_user_via_session(client=client, email=users[0]['email'])
     url = url_for("weko_authors.delete_author")
     with patch("weko_authors.views.get_count_item_link", return_value=0):
@@ -397,7 +398,7 @@ def test_delete_author(client, db,users, search_index, create_author):
 
     # author is linked to items
     input = {"pk_id": str(id),"Id":search_id}
-    with patch("weko_authors.views.get_count_item_link", retutn_value=1):
+    with patch("weko_authors.views.get_count_item_link", return_value=1):
         res = client.post(url, json=input)
         assert res.status_code == 500
         assert res.get_data().decode("utf-8") == 'The author is linked to items and cannot be deleted.'
@@ -424,7 +425,7 @@ def test_get_acl_guest(client):
     url = url_for("weko_authors.get")
     res = client.post(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/search")
+    assert res.location == url_for('security.login',next="/api/authors/search", _external=True)
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_get_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -575,7 +576,7 @@ def test_getById_acl_guest(client):
     url = url_for("weko_authors.getById")
     res = client.post(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/search_edit")
+    assert res.location == url_for('security.login',next="/api/authors/search_edit", _external=True)
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_getById_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -635,7 +636,7 @@ def test_mapping_acl_guest(client):
     url = url_for("weko_authors.mapping")
     res = client.post(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/input")
+    assert res.location == url_for('security.login',next="/api/authors/input", _external=True)
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_mapping_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -828,7 +829,7 @@ def test_gatherById_acl_guest(client):
     url = url_for("weko_authors.gatherById")
     res = client.post(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/gather")
+    assert res.location == url_for('security.login',next="/api/authors/gather", _external=True)
 
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_gatherById_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
@@ -940,7 +941,7 @@ def test_get_managed_communities(client, users, db):
                                  "activityCommunityId": None}
 
         mock_get.return_value = ([], True)
-        with patch("weko_authors.views.WorkActivity") as mock_activity:
+        with patch("weko_workflow.api.WorkActivity") as mock_activity:
             mock_activity.get_activity_by_id.return_value = MagicMock(activity_community_id="community2")
             res = client.get(url, query_string={"activity_id": "test_activity_id"})
             assert res.status_code == 200
@@ -960,7 +961,7 @@ def test_get_managed_communities_acl_guest(client):
     url = url_for("weko_authors.get_managed_communities")
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/managed_communities")
+    assert res.location == url_for('security.login',next="/api/authors/managed_communities", _external=True)
 
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_get_managed_communities_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
@@ -1002,7 +1003,7 @@ def test_get_managed_communities(client, users, db):
                                  "activityCommunityId": None}
 
         mock_get.return_value = ([], True)
-        with patch("weko_authors.views.WorkActivity") as mock_activity:
+        with patch("weko_workflow.api.WorkActivity") as mock_activity:
             mock_activity.get_activity_by_id.return_value = MagicMock(activity_community_id="community2")
             res = client.get(url, query_string={"activity_id": "test_activity_id"})
             assert res.status_code == 200
@@ -1021,7 +1022,7 @@ def test_get_prefix_list_acl_guest(client):
     url = url_for("weko_authors.get_prefix_list")
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/search_prefix")
+    assert res.location == url_for('security.login',next="/api/authors/search_prefix", _external=True)
 
 #.tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_get_prefix_list_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -1088,7 +1089,7 @@ def test_get_affiliation_list_acl_guest(client):
     url = url_for("weko_authors.get_affiliation_list")
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/search_affiliation")
+    assert res.location == url_for('security.login',next="/api/authors/search_affiliation", _external=True)
 
 #.tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_get_affiliation_list_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -1153,7 +1154,7 @@ def test_get_list_schema_acl_guest(client):
     url = url_for("weko_authors.get_list_schema")
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/list_vocabulary")
+    assert res.location == url_for('security.login',next="/api/authors/list_vocabulary", _external=True)
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_get_list_schema_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -1179,7 +1180,7 @@ def test_get_list_schema(client, users):
     url = url_for("weko_authors.get_list_schema")
     login_user_via_session(client=client, email=users[0]['email'])
     test = {
-        "list":['e-Rad', 'NRID', 'ORCID', 'ISNI', 'VIAF', 'AID','kakenhi', 'Ringgold', 'GRID', 'ROR', 'researchmap', 'Other'],
+        "list":['e-Rad', 'e-Rad_Researcher', 'NRID', 'ORCID', 'ISNI', 'VIAF', 'AID','kakenhi', 'Ringgold', 'GRID', 'ROR', 'researchmap', 'Other'],
         "index":12
     }
     res = client.get(url)
@@ -1191,7 +1192,7 @@ def test_get_list_affiliation_schema_acl_guest(client):
     url = url_for("weko_authors.get_list_affiliation_schema")
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/list_affiliation_scheme")
+    assert res.location == url_for('security.login',next="/api/authors/list_affiliation_scheme", _external=True)
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_get_list_affiliation_schema_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -1231,7 +1232,7 @@ def test_update_prefix_acl_guest(client):
     """
     url = url_for("weko_authors.update_prefix")
     res = client.post(url)
-    assert res.location == url_for('security.login',next="/api/authors/edit_prefix")
+    assert res.location == url_for('security.login',next="/api/authors/edit_prefix", _external=True)
 
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_update_prefix_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
@@ -1324,7 +1325,7 @@ def test_delete_prefix_acl_guest(client, authors_prefix_settings):
     url = url_for('weko_authors.delete_prefix', id=id)
     res = client.delete(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/delete_prefix/1")
+    assert res.location == url_for('security.login',next="/api/authors/delete_prefix/1", _external=True)
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_delete_prefix_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -1374,7 +1375,7 @@ def test_create_prefix_acl_guest(client):
     url = url_for("weko_authors.create_prefix")
     res = client.put(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/add_prefix")
+    assert res.location == url_for('security.login',next="/api/authors/add_prefix", _external=True)
 
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_create_prefix_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
@@ -1453,7 +1454,7 @@ def test_update_affiliation_acl_guest(client):
     url = url_for("weko_authors.update_affiliation")
     res = client.post(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/edit_affiliation")
+    assert res.location == url_for('security.login',next="/api/authors/edit_affiliation", _external=True)
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_update_affiliation_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -1536,7 +1537,7 @@ def test_delete_affiliation_acl_guest(client, authors_affiliation_settings):
     url = url_for('weko_authors.delete_affiliation', id=1)
     res = client.delete(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/delete_affiliation/1")
+    assert res.location == url_for('security.login',next="/api/authors/delete_affiliation/1", _external=True)
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_delete_prefix_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp
 @pytest.mark.parametrize('index, is_permission', [
@@ -1587,7 +1588,7 @@ def test_create_affiliation_acl_guest(client):
     url = url_for("weko_authors.create_affiliation")
     res = client.put(url)
     assert res.status_code == 302
-    assert res.location == url_for('security.login',next="/api/authors/add_affiliation")
+    assert res.location == url_for('security.login',next="/api/authors/add_affiliation", _external=True)
 
 
 # .tox/c1/bin/pytest --cov=weko_authors tests/test_views.py::test_create_affiliation_acl_users -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-authors/.tox/c1/tmp

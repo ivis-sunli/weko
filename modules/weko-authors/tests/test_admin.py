@@ -869,8 +869,6 @@ class TestImportView():
                 {"pk_id": "test_id1", "scheme": "GRID", "name": "name1"},
             ],
         }
-        mock_logger_error = MagicMock()
-        current_app.logger.error = mock_logger_error
         current_cache.set(current_app.config["WEKO_AUTHORS_IMPORT_CACHE_RESULT_OVER_MAX_FILE_PATH_KEY"],
                         {"key": "cache_result_over_max_file_path_key"})
         with patch("weko_authors.admin.check_is_import_available",return_value={"is_available":True}), \
@@ -879,6 +877,7 @@ class TestImportView():
                     {"pk_id": "test_id1", "weko_id": "1001"},
                 ], 1, 2000)), \
              patch("weko_authors.admin.group.apply_async",return_value=MockTaskGroup()), \
+             patch.object(current_app._get_current_object().logger, "error") as mock_logger_error, \
              patch("os.remove", side_effect=FileNotFoundError), \
              patch("weko_authors.admin.import_author_over_max.delay",return_value=mock_task), \
              patch("weko_authors.admin.update_cache_data",return_value=None):
@@ -894,8 +893,6 @@ class TestImportView():
                 {"pk_id": "test_id1", "scheme": "GRID", "name": "name1"},
             ],
         }
-        mock_logger_error = MagicMock()
-        current_app.logger.error = mock_logger_error
         current_cache.set(current_app.config["WEKO_AUTHORS_IMPORT_CACHE_RESULT_FILE_PATH_KEY"],
                 {"key": "authors_import_result_file_path"})
         with patch("weko_authors.admin.check_is_import_available",return_value={"is_available":True}), \
@@ -903,6 +900,7 @@ class TestImportView():
                     {"pk_id": "test_id0", "weko_id": "1000"},
                     {"pk_id": "test_id1", "weko_id": "1001"},
                 ], 1, 2000)), \
+             patch.object(current_app._get_current_object().logger, "error") as mock_logger_error, \
              patch("os.remove", side_effect=FileNotFoundError), \
              patch("weko_authors.admin.group.apply_async",return_value=MockTaskGroup()), \
              patch("weko_authors.admin.import_author_over_max.delay",return_value=mock_task), \
