@@ -98,14 +98,35 @@ from weko_workflow.models import Action, ActionStatus,FlowDefine,FlowAction,Work
 
 
 from .helpers import json_data, create_record
+from copy import deepcopy
+from flask import g
+from flask_babel import refresh
+from invenio_theme import InvenioTheme
+from sqlalchemy.engine import make_url
+from weko_accounts.config import WEKO_ACCOUNTS_GAKUNIN_GROUP_PATTERN_DICT
+from weko_admin.config import WEKO_ADMIN_FACET_SEARCH_SETTING
 
+
+@pytest.fixture(scope='session')
+def database_uri():
+    """Create a database owned exclusively by this test session."""
+    url = make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(database="weko_admin_test_" + uuid.uuid4().hex)
+    uri = url.render_as_string(hide_password=False)
+    create_database(uri)
+    try:
+        yield uri
+    finally:
+        drop_database(uri)
 
 @pytest.fixture()
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
+
 
 @pytest.fixture()
 def cache_config():
@@ -130,18 +151,27 @@ def cache_config():
     return config
 
 @pytest.fixture()
-def base_app(instance_path, cache_config,request ,search_class):
+def base_app(instance_path, cache_config, request, search_class, database_uri, monkeypatch):
     """Flask application fixture."""
-    os.environ['INVENIO_ELASTICSEARCH_HOST']='opensearch_test'
+    monkeypatch.setenv('INVENIO_ELASTICSEARCH_HOST', os.environ.get('SEARCH_HOST', 'opensearch'))
+    search_alias = "test-weko-admin-" + uuid.uuid4().hex
     app_ = Flask('test_weko_admin_app', instance_path=instance_path)
+
+    @app_.teardown_request
+    def clear_login_cache(exception):
+        # The fixture keeps an app context for DB assertions and url_for.
+        # Flask-Login stores the loaded user in that context's g object.
+        g.pop("_login_user", None)
+        refresh()
+
     app_.config.update(
         SERVER_NAME='test_server',
+        APP_THEME=["bootstrap3"],
         ACCOUNTS_USE_CELERY=False,
         SECRET_KEY='SECRET_KEY',
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #      'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_uri,
         #SEARCH_OPENSEARCH_HOSTS=os.environ.get(
         #    'SEARCH_OPENSEARCH_HOSTS', None),
         SEARCH_OPENSEARCH_HOSTS = os.environ.get("SEARCH_OPENSEARCH_HOSTS", "opensearch"),
@@ -160,27 +190,29 @@ def base_app(instance_path, cache_config,request ,search_class):
         GOOGLE_TRACKING_ID_USER="test_google_tracking_id",
         ADDTHIS_USER_ID="test_addthis_user_id",
         I18N_LANGUAGES=[("ja","Japanese"), ("en","English")],
-        CACHE_REDIS_URL=os.environ.get("CACHE_REDIS_URL", "redis://redis:6379/0"),
-        CACHE_REDIS_DB='0',
+        CACHE_REDIS_URL="redis://redis:6379/15",
+        CACHE_REDIS_DB="15",
         CACHE_REDIS_HOST="redis",
         REDIS_PORT='6379',
         ACCOUNTS_SESSION_REDIS_DB_NO = 1,
         CACHE_TYPE="redis",
-        SEARCH_UI_SEARCH_INDEX="weko",
+        SEARCH_UI_SEARCH_INDEX=search_alias,
         WEKO_AUTHORS_SEARCH_INDEX_NAME="test_weko-authors",
-        INDEXER_DEFAULT_INDEX="{}-weko-item-v1.0.0".format("test"),
+        INDEXER_DEFAULT_INDEX=search_alias + "-item-v1.0.0",
         INDEXER_FILE_DOC_TYPE="content",
         THEME_SITEURL = 'https://localhost',
         CRAWLER_REDIS_DB=3,
         CRAWLER_REDIS_TTL=86400,
         WEKO_THEME_INSTANCE_DATA_DIR="data",
-        SEARCH_INDEX_PREFIX="test-",
+        SEARCH_INDEX_PREFIX="",
+        WEKO_ADMIN_FACET_SEARCH_SETTING=deepcopy(WEKO_ADMIN_FACET_SEARCH_SETTING),
         WEKO_ADMIN_COMMUNITY_ACCESS_LIST =WEKO_ADMIN_COMMUNITY_ACCESS_LIST,
         WEKO_ADMIN_REPOSITORY_ACCESS_LIST = WEKO_ADMIN_REPOSITORY_ACCESS_LIST,
         WEKO_ADMIN_ACCESS_TABLE=WEKO_ADMIN_ACCESS_TABLE,
         WEKO_ADMIN_PERMISSION_ROLE_SYSTEM =WEKO_ADMIN_PERMISSION_ROLE_SYSTEM,
         WEKO_ADMIN_RESTRICTED_ACCESS_SETTINGS = WEKO_ADMIN_RESTRICTED_ACCESS_SETTINGS,
         WEKO_WORKFLOW_USAGE_REPORT_WORKFLOW_NAME = 'test workflow31001',
+        WEKO_ACCOUNTS_GAKUNIN_GROUP_PATTERN_DICT=deepcopy(WEKO_ACCOUNTS_GAKUNIN_GROUP_PATTERN_DICT),
         WEKO_PERMISSION_SUPER_ROLE_USER=WEKO_PERMISSION_SUPER_ROLE_USER,
         WEKO_ITEMS_UI_CRIS_LINKAGE_RESEARCHMAP_MERGE_MODE_DEFAULT=WEKO_ITEMS_UI_CRIS_LINKAGE_RESEARCHMAP_MERGE_MODE_DEFAULT,
         WEKO_ADMIN_REPORT_TYPES = [
@@ -241,40 +273,49 @@ def base_app(instance_path, cache_config,request ,search_class):
                             _('Number Of File Regeneration')]
         },
     )
-    app_.testing = True
-    app_.login_manager = dict(_login_disabled=True)
-    Babel(app_)
-    InvenioI18N(app_)
-    InvenioDB(app_)
-    Mail(app_)
-    Menu(app_)
-    InvenioDB(app_)
-    InvenioAccounts(app_)
-    InvenioAccess(app_)
-    InvenioAdmin(app_)
-    InvenioCache(app_)
-    InvenioOAuth2Server(app_)
-    InvenioPIDRelations(app_)
-    InvenioPIDStore(app_)
-    InvenioFilesREST(app_)
-    InvenioOAuth2Server(app_)
-    WekoWorkflow(app_)
-    WekoAuthors(app_)
-    WekoRecords(app_)
-    WekoRecordsUI(app_)
-    WekoIndexTree(app_)
-    WekoTheme(app_)
+    try:
+        app_.testing = True
+        app_.login_manager = dict(_login_disabled=True)
+        Babel(app_)
+        InvenioI18N(app_)
+        InvenioDB(app_)
+        Mail(app_)
+        InvenioTheme(app_)
+        InvenioAccounts(app_)
+        InvenioAccess(app_)
+        InvenioAdmin(app_)
+        InvenioCache(app_)
+        InvenioOAuth2Server(app_)
+        InvenioPIDRelations(app_)
+        InvenioPIDStore(app_)
+        InvenioFilesREST(app_)
+        WekoWorkflow(app_)
+        WekoAuthors(app_)
+        WekoRecords(app_)
+        WekoRecordsUI(app_)
+        WekoIndexTree(app_)
+        WekoTheme(app_)
 
-    FlaskCeleryExt(app_)
-    WekoSearchUI(app_)
-    WekoSchemaUI(app_)
-    #search = InvenioSearch(app_, client=MockSearch())
-    InvenioSearch(app_)
-    #search.register_mappings(search_class.Meta.index, 'tests.mock_module.mappings')
-    InvenioIndexer(app_)
-    InvenioRecords(app_, client=MockSearch())
-    InvenioOAIServer(app_)
-    yield app_
+        FlaskCeleryExt(app_)
+        WekoSearchUI(app_)
+        WekoSchemaUI(app_)
+        #search = InvenioSearch(app_, client=MockSearch())
+        search = InvenioSearch(app_, entry_point_group_mappings=None)
+        index = app_.config["INDEXER_DEFAULT_INDEX"]
+        search.mappings[index] = os.path.join(os.path.dirname(__file__), "data", "item-v1.0.0.json")
+        search.aliases[app_.config["SEARCH_UI_SEARCH_INDEX"]] = [index]
+        #search.register_mappings(search_class.Meta.index, 'tests.mock_module.mappings')
+        InvenioIndexer(app_)
+        InvenioRecords(app_, client=MockSearch())
+        InvenioOAIServer(app_)
+        yield app_
+    finally:
+        if "invenio-oaiserver" in app_.extensions:
+            app_.extensions["invenio-oaiserver"].unregister_signals()
+        if "sqlalchemy" in app_.extensions:
+            with app_.app_context():
+                db_.session.remove()
+                db_.engine.dispose()
 
 
 @pytest.fixture()
@@ -296,13 +337,13 @@ def i18n_app(app):
 
 @pytest.fixture()
 def db(app):
-    if database_exists(str(db_.engine.url)):
-        drop_database(str(db_.engine.url))
-    create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.drop_all()
+
 
 @pytest.fixture()
 def i18n_app(app):
@@ -383,7 +424,7 @@ def client(app):
         yield client
 
 @pytest.fixture()
-def admin_app(instance_path):
+def admin_app(instance_path, database_uri):
     base_app_ = Flask(__name__, instance_path=instance_path)
     base_app_.config.update(
         SECRET_KEY='SECRET KEY',
@@ -391,10 +432,9 @@ def admin_app(instance_path):
         SERVER_NAME='test_server',
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #     'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_uri,
         I18N_LANGUAGES=[("ja","Japanese"), ("en","English")],
-        WEKO_ADMIN_FACET_SEARCH_SETTING={"name_en": "","name_jp": "","mapping": "","active": True,"aggregations": []},
+        WEKO_ADMIN_FACET_SEARCH_SETTING=deepcopy(WEKO_ADMIN_FACET_SEARCH_SETTING),
         WEKO_ADMIN_FACET_SEARCH_SETTING_TEMPLATE="weko_admin/admin/facet_search_setting.html"
     )
     base_app_.testing = True
@@ -404,7 +444,11 @@ def admin_app(instance_path):
     InvenioI18N(base_app_)
 
     with base_app_.app_context():
-        yield base_app_
+        try:
+            yield base_app_
+        finally:
+            db_.session.remove()
+            db_.engine.dispose()
 
 @pytest.fixture()
 def i18n_admin_app(admin_app):
@@ -417,36 +461,37 @@ def i18n_admin_app(admin_app):
 
 @pytest.fixture()
 def admin_db(admin_app):
-    if not database_exists(str(db_.engine.url)):
-                create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.drop_all()
+
 
 
 @pytest.fixture()
 def search_index(app):
-    current_search_client.indices.delete(index="test-*")
+    index = app.config["INDEXER_DEFAULT_INDEX"]
+    alias = app.config["SEARCH_UI_SEARCH_INDEX"]
     mapping = json_data("data/item-v1.0.0.json")
 
+    client = current_search_client
     try:
-        current_search_client.indices.create(
-            app.config["INDEXER_DEFAULT_INDEX"], body=mapping
-        )
-        current_search_client.indices.put_alias(
-            index=app.config["INDEXER_DEFAULT_INDEX"], name="test-weko"
-        )
-    except:
-        current_search_client.indices.create("test-weko-items", body=mapping)
-        current_search_client.indices.put_alias(
-            index="test-weko-items", name="test-weko"
-        )
-
-    try:
-        yield current_search_client
+        client.indices.create(index=index, body=mapping)
+        client.indices.put_alias(index=index, name=alias)
+        yield client
     finally:
-        current_search_client.indices.delete(index="test-*")
+        for owned_index in (
+            index,
+            index + "-percolators",
+            index + "-tmp",
+            index + "-percolators-tmp",
+            index + "-tmp-percolators",
+        ):
+            client.indices.delete(index=owned_index, ignore=[404])
+
+
 
 @pytest.fixture
 def script_info(app):
@@ -455,7 +500,27 @@ def script_info(app):
 @pytest.fixture
 def redis_connect(app):
     redis_connection = RedisConnection().connection(db=app.config['CACHE_REDIS_DB'], kv = True)
-    return redis_connection
+    keys = [
+        "test_cache",
+        "test_key",
+        "test_key1",
+        "test_key2",
+        "index_tree_view_test_ja",
+        "index_tree_view_test_en",
+        "index_reset_tree_view_test_ja",
+        "index_reset_tree_view_test_en",
+        "index_reset_tree_ignore_more_view_test_ja",
+        "index_reset_tree_ignore_more_view_test_en",
+    ]
+    try:
+        yield redis_connection
+    finally:
+        try:
+            for key in keys:
+                redis_connection.delete(key)
+        finally:
+            redis_connection.redis.connection_pool.disconnect()
+
 
 @pytest.fixture()
 def users(app, db):
@@ -1326,7 +1391,7 @@ class TestSearch(RecordsSearch):
         self._extra.update(**{'_source': {'excludes': ['_access']}})
 
 @pytest.fixture()
-def reindex_settings(i18n_app):
+def reindex_settings(i18n_app, search_index):
     record0 = _create_record(i18n_app, {
         '_oai': {'sets': ['1669370353014']}, 'title_statement': {'title': 'Test0'},
         '$schema': {"test-weko-item-v1.0.0": "https://127.0.0.1/schema/deposits/deposit-v1.0.0.json"}
