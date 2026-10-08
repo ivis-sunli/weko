@@ -47,7 +47,8 @@ from invenio_search import InvenioSearch,RecordsSearch, current_search_client
 from opensearchpy import OpenSearch
 from os.path import dirname, join
 from sqlalchemy import inspect
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy.engine.url import make_url
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 
 from weko_accounts import WekoAccounts
 from weko_authors import WekoAuthors
@@ -139,8 +140,21 @@ def make_celery(app):
     celery.conf.update(app.config)
     return celery
 
+@pytest.fixture(scope='session')
+def database_uri():
+    """Own a disposable database; credentials come from the runner environment."""
+    url = make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+        database='weko_authors_test_' + uuid.uuid4().hex)
+    uri = url.render_as_string(hide_password=False)
+    create_database(uri)
+    try:
+        yield uri
+    finally:
+        drop_database(uri)
+
+
 @pytest.fixture()
-def base_app(instance_path,search_class, request):
+def base_app(instance_path,search_class, request, database_uri):
     """Flask application fixture for Search."""
     app_ = Flask('testapp', instance_path=instance_path)
     app_.config.update(
@@ -148,9 +162,7 @@ def base_app(instance_path,search_class, request):
         SECRET_KEY='SECRET_KEY',
         TESTING=True,
         SERVER_NAME='app',
-        SQLALCHEMY_DATABASE_URI=os.environ.get(
-           'SQLALCHEMY_DATABASE_URI',
-           'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_uri,
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #     'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
@@ -174,6 +186,7 @@ def base_app(instance_path,search_class, request):
         CELERY_EAGER_PROPAGATES_EXCEPTIONS=True,
         CELERY_RESULT_BACKEND="cache",
         CACHE_REDIS_URL=os.environ.get("CACHE_REDIS_URL", "redis://redis:6379/0"),
+        CACHE_KEY_PREFIX='weko-authors-test-' + uuid.uuid4().hex + ':',
         CACHE_REDIS_DB='0',
         CACHE_REDIS_HOST="redis",
         SEARCH_OPENSEARCH_HOSTS=os.environ.get("INVENIO_ELASTICSEARCH_HOST"),
@@ -204,6 +217,7 @@ def base_app(instance_path,search_class, request):
     InvenioFilesREST(app_)
     if hasattr(request, 'param'):
         if 'is_search' in request.param:
+            app_.config['WEKO_AUTHORS_SEARCH_INDEX_NAME'] = 'test-authors-' + uuid.uuid4().hex
             search = InvenioSearch(app_)
     else:
         search = InvenioSearch(app_, client=MockSearch())
@@ -242,15 +256,30 @@ def base_app(instance_path,search_class, request):
     return app_
 
 
+def clear_test_cache(app):
+    """Remove only this application's UUID-prefixed cache entries."""
+    from redis import Redis
+
+    cache = Redis.from_url(app.config['CACHE_REDIS_URL'])
+    try:
+        for key in cache.scan_iter(match=app.config['CACHE_KEY_PREFIX'] + '*'):
+            cache.delete(key)
+    finally:
+        cache.close()
+
+
 @pytest.fixture()
 def app(base_app):
     """Flask application fixture."""
     with base_app.app_context():
-        yield base_app
+        try:
+            yield base_app
+        finally:
+            clear_test_cache(base_app)
 
 
 @pytest.fixture()
-def base_app2(instance_path,search_class):
+def base_app2(instance_path,search_class, database_uri):
     """Flask application fixture for Search."""
     app_ = Flask('testapp', instance_path=instance_path)
     WEKO_AUTHORS_FILE_MAPPING_FOR_AFFILIATION ={
@@ -382,9 +411,7 @@ def base_app2(instance_path,search_class):
         SECRET_KEY='SECRET_KEY',
         TESTING=True,
         SERVER_NAME='app2',
-        SQLALCHEMY_DATABASE_URI=os.environ.get(
-           'SQLALCHEMY_DATABASE_URI',
-           'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_uri,
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #    'SQLALCHEMY_DATABASE_URI',
         #    'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/invenio'),
@@ -407,6 +434,7 @@ def base_app2(instance_path,search_class):
         CELERY_EAGER_PROPAGATES_EXCEPTIONS=True,
         CELERY_RESULT_BACKEND="cache",
         CACHE_REDIS_URL='redis://redis:6379/0',
+        CACHE_KEY_PREFIX='weko-authors-test-' + uuid.uuid4().hex + ':',
         CACHE_REDIS_DB='0',
         CACHE_REDIS_HOST="redis",
         WEKO_AUTHORS_EXPORT_BATCH_SIZE=2,
@@ -474,7 +502,10 @@ def base_app2(instance_path,search_class):
 def app2(base_app2):
     """Flask application fixture."""
     with base_app2.app_context():
-        yield base_app2
+        try:
+            yield base_app2
+        finally:
+            clear_test_cache(base_app2)
 
 
 @pytest.fixture()
@@ -482,10 +513,19 @@ def db(app):
     """Database fixture."""
     if not database_exists(str(db_.engine.url)):
         create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    try:
+        db_.create_all()
+        db_.session.execute(
+            "CREATE TABLE user_activity_logs_test_partition "
+            "PARTITION OF user_activity_logs DEFAULT")
+        db_.session.commit()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.session.execute("DROP TABLE IF EXISTS user_activity_logs_test_partition")
+        db_.session.commit()
+        db_.drop_all()
+        db_.engine.dispose()
 
 
 @pytest.fixture()
@@ -496,17 +536,15 @@ def client(app):
 
 @pytest.fixture()
 def search_index(app):
-    current_search_client.indices.delete(index='test-*')
+    index_name = "test-authors-" + uuid.uuid4().hex
     with open("tests/mock_module/mapping/os-v2/authors/author-v1.0.0.json","r") as f:
         mapping = json.load(f)
-    with app.test_request_context():
-        current_search_client.indices.create("test-authors-author-v1.0.0",body=mapping)
-        current_search_client.indices.put_alias(index="test-authors-author-v1.0.0", name=app.config["WEKO_AUTHORS_SEARCH_INDEX_NAME"])
-
+    current_search_client.indices.create(index_name,body=mapping)
     try:
+        current_search_client.indices.put_alias(index=index_name, name=app.config["WEKO_AUTHORS_SEARCH_INDEX_NAME"])
         yield current_search_client
     finally:
-        current_search_client.indices.delete(index="test-*")
+        current_search_client.indices.delete(index=index_name, ignore=[404])
 
     # with app.test_request_context():
     #     current_search_client.indices.delete_alias(index="test-authors-author-v1.0.0", name=app.config["WEKO_AUTHORS_SEARCH_INDEX_NAME"])
@@ -768,41 +806,37 @@ def authors_affiliation_settings(db):
     return aass
 
 @pytest.fixture()
-def file_instance(db):
+def file_instance(db, tmp_path):
+    location = Location(name='authors-test', uri=str(tmp_path), default=True)
+    db.session.add(location)
     file = FileInstance(
-        uri="/var/tmp/test_dir",
+        uri=str(tmp_path / 'existing-author-export.tsv'),
         storage_class="S",
         size=18,
     )
     db.session.add(file)
     db.session.commit()
+    return file
 
 
 @pytest.fixture()
 def search_index2(app2):
-    index_name = app2.config["INDEXER_DEFAULT_INDEX"]
-    alias_name = "test-author-alias"
+    index_name = "test-authors-" + uuid.uuid4().hex
+    app2.config["INDEXER_DEFAULT_INDEX"] = index_name
+    alias_name = "test-author-alias-" + uuid.uuid4().hex
+    app2.config["WEKO_AUTHORS_SEARCH_INDEX_NAME"] = alias_name
 
     with open("tests/mock_module/mapping/os-v2/authors/author-v1.0.0.json","r") as f:
         mapping = json.load(f)
 
     with app2.test_request_context():
-        current_search_client.indices.create(
-            index=index_name, body=mapping, ignore=[400]
-        )
-        current_search_client.indices.put_alias(
-            index=index_name, name=alias_name
-        )
-
-    yield current_search_client
-
-    with app2.test_request_context():
-        current_search_client.indices.delete_alias(
-            index=index_name, name=alias_name
-        )
-        current_search_client.indices.delete(
-            index=index_name, ignore=[400, 404]
-        )
+        search_client = current_search_client._get_current_object()
+        search_client.indices.create(index=index_name, body=mapping)
+        try:
+            search_client.indices.put_alias(index=index_name, name=alias_name)
+            yield search_client
+        finally:
+            search_client.indices.delete(index=index_name, ignore=[404])
 
 from invenio_oauth2server.models import Client
 
