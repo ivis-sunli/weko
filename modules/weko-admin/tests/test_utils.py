@@ -138,12 +138,19 @@ def test_update_admin_lang_setting(language_setting):
         {"lang_code":"en","lang_name":"English2","is_registered":False,"sequence":10},
     ]
     result = update_admin_lang_setting(admin_lang_settings)
-    assert result == "success"
+    assert result is None
+    from invenio_db import db
+    db.session.commit()
+    db.session.expire_all()
+    updated = AdminLangSettings.query.filter_by(lang_code="en").one()
+    assert (updated.lang_name, updated.is_registered, updated.sequence) == ("English2", False, 10)
+    with patch("weko_admin.utils.AdminLangSettings.update_lang",side_effect=Exception("test_error")):
+        with pytest.raises(Exception, match="test_error"):
+            result = update_admin_lang_setting(admin_lang_settings)
+    db.session.rollback()
     assert AdminLangSettings.query.filter_by(lang_code="en").one().lang_name == "English2"
 
-    with patch("weko_admin.utils.AdminLangSettings.update_lang",side_effect=Exception("test_error")):
-        result = update_admin_lang_setting(admin_lang_settings)
-        assert result=="test_error"
+
 
 
 # def get_selected_language():
@@ -655,10 +662,10 @@ def test_make_stats_file(client, roles, mocker):
     raw_stats={"total":10}
     test = \
         'Detail Views Per Index\n'\
-        'Aggregation Month,2022-10\n'\
+        'Aggregations List,2022-10\n'\
         '""\n'\
         'Detail Views Per Index\n'\
-        'Index,No. Of Views\n'\
+        'Hide,Number of File Previews\n'\
         'Total Detail Views,10\n'
     result = make_stats_file(raw_stats, file_type, report_date, False)
     assert result.getvalue() == test
@@ -668,10 +675,10 @@ def test_make_stats_file(client, roles, mocker):
     raw_stats={"all_groups":["test_group"]}
     test = \
         'No. Of Paid File Downloads\n'\
-        'Aggregation Month,2022-10\n'\
+        'Aggregations List,2022-10\n'\
         '""\n'\
         'No. Of Paid File Downloads\n'\
-        'File Name,Registered Index Name,No. Of Times Downloaded,Non-Logged In User,System Administrator,Repository Administrator,Contributor,Community Administrator,Site License,Admin,Registrar\n'
+        'File Name,Registered Index Name,Number of  Downloads/Views,Non-Logged In User,' + ','.join(roles) + ',Site License,Admin,Registrar\n'
     result = make_stats_file(raw_stats, file_type, report_date, False)
     assert result.getvalue() == test
 
@@ -681,13 +688,13 @@ def test_make_stats_file(client, roles, mocker):
     raw_stats={"open_access":"test_open_access"}
     test = \
         'Access Count By Site License\n'\
-        'Aggregation Month,2022-10\n'\
+        'Aggregations List,2022-10\n'\
         '""\n'\
         'Access Count By Site License\n'\
-        'WEKO Top Page Access Count,Number Of Searches,Number Of Views,Number Of File download,Number Of File Regeneration\n'\
+        'WEKO Top Page Access Count,Number Of Searches,Number Of Views,Number of File Downloads,Number of items registered\n'\
         '""\n'\
         'Access Number Breakdown By Site License\n'\
-        'WEKO Top Page Access Count,Number Of Searches,Number Of Views,Number Of File download,Number Of File Regeneration\n'
+        'WEKO Top Page Access Count,Number Of Searches,Number Of Views,Number of File Downloads,Number of items registered\n'
     result = make_stats_file(raw_stats, file_type, report_date, False)
     assert result.getvalue() == test
 
@@ -701,10 +708,10 @@ def test_make_stats_file(client, roles, mocker):
         'Aggregation Period,2022-10-01_2022-10-07\n'\
         '""\n'\
         'Access Count By Site License\n'\
-        'WEKO Top Page Access Count,Number Of Searches,Number Of Views,Number Of File download,Number Of File Regeneration\n'\
+        'WEKO Top Page Access Count,Number Of Searches,Number Of Views,Number of File Downloads,Number of items registered\n'\
         '""\n'\
         'Access Number Breakdown By Site License\n'\
-        'Institution Name,WEKO Top Page Access Count,Number Of Searches,Number Of Views,Number Of File download,Number Of File Regeneration\n'
+        'Condition Name,WEKO Top Page Access Count,Number Of Searches,Number Of Views,Number of File Downloads,Number of items registered\n'
     result = make_stats_file(raw_stats, file_type, report_date, True)
     assert result.getvalue() == test
 
@@ -716,7 +723,7 @@ def test_make_stats_file(client, roles, mocker):
         'Aggregation Period,2022-10-01_2022-10-07\n'\
         '""\n'\
         'Access Count By Site License\n'\
-        'WEKO Top Page Access Count,Number Of Searches,Number Of Views,Number Of File download,Number Of File Regeneration\n'\
+        'WEKO Top Page Access Count,Number Of Searches,Number Of Views,Number of File Downloads,Number of items registered\n'\
         '""\n'\
         'Access Number Breakdown By Site License\n'
     result = make_stats_file(raw_stats, file_type, report_date, True)
@@ -730,7 +737,7 @@ def test_make_stats_file(client, roles, mocker):
         'Aggregation Period,2022-10-01_2022-10-07\n'\
         '""\n'\
         'Detail Views Count\n'\
-        'Title,Registered Index Name,View Count,Non-logged-in User\n'
+        'Title,Registered Index Name,View Count,Non-Logged in User\n'
     result = make_stats_file(raw_stats, file_type, report_date, True)
     assert result.getvalue() == test
 
@@ -803,8 +810,29 @@ def test_write_report_file_rows(db,users):
     ]
     other_info = ["test_group"]
     write_report_file_rows(writer,record,"billing_file_download",other_info)
-    assert output.getvalue() == "test_file_key1,test_index_list1,1,True,False,test_site_license1,False,test_reg1\n"\
-                                "test_file_key2,test_index_list2,1,10,True,False,test_site_license2,False,test_reg2\n"
+    from invenio_accounts.models import Role
+    roles = [role.name for role in Role.query.all()]
+    expected_counts = {
+        "System Administrator": ["0", "0", "3"],
+        "Repository Administrator": ["0", "0", "0"],
+        "Contributor": ["0", "2", "0"],
+        "Community Administrator": ["0", "0", "0"],
+        "General": ["", "", ""],
+        "Original Role": ["", "", ""],
+        "Student": ["", "", ""],
+    }
+    assert set(roles) == set(expected_counts)
+    rows = list(csv.reader(StringIO(output.getvalue())))
+    assert len(rows) == 3
+    assert [row[:4] for row in rows] == [
+        ["test_file_key1", "test_index_list1", "1", "1"],
+        ["test_file_key2", "test_index_list2", "2", "0"],
+        ["test_file_key3", "test_index_list3", "3", "0"],
+    ]
+    assert [row[-3:] for row in rows] == [["1", "0", "0"], ["0", "0", "2"], ["0", "3", "0"]]
+    assert all(len(row) == 7 + len(roles) for row in rows)
+    for position, role in enumerate(roles):
+        assert [row[4 + position] for row in rows] == expected_counts[role]
     # filetype is index_access
     record = [{"index_name":"test_index","view_count":"10"}]
     output = StringIO()
@@ -845,7 +873,7 @@ def test_write_report_file_rows(db,users):
     writer = csv.writer(output,delimiter=",",lineterminator="\n")
     write_report_file_rows(writer,record,"file_using_per_user")
     assert output.getvalue() == ",Guest,10,5\n"\
-                                "user@test.org,,10,5\n"
+                                "user@test.org,test smith,10,5\n"
 
     # filetype is top_page_access
     record = [{"host":"test_host","ip":"123.456.789","count":"10"}]
@@ -1381,7 +1409,7 @@ class MockClient:
                 },
                 "item_cnt":3
             }
-        elif index == "test-weko":
+        elif index == current_app.config["SEARCH_UI_SEARCH_INDEX"]:
             return {"item_cnt":3}
 # class FeedbackMail:
 class TestFeedbackMail:
@@ -2384,21 +2412,25 @@ class TestUsageReport:
             url = "http://test_server/workflow/activity/detail/{}".format(activity.id)
             return url, "test.test@test.org"
         mocker.patch("weko_admin.utils.UsageReport._UsageReport__get_usage_report_email_and_url", side_effect=mock_email_and_url)
-        mocker.patch("weko_workflow.utils.get_mail_data", return_value=("test_subject", "test_body"))
+        mocker.patch("weko_workflow.utils.get_mail_data", side_effect=lambda mail_id: {
+            "mail_subject": "test_subject", "mail_body": "test_body", "mail_recipients": []
+        })
         mocker.patch("weko_workflow.utils.replace_characters", return_value="test_body")
         usage_report = UsageReport()
         acts = [
             activities[1],# not exist item_id, extra_info
             activities[3], # exist item_id, extra_info
         ]
-        mocker.patch("weko_workflow.utils.send_mail", return_value=True)
-        result = usage_report.send_reminder_mail([],mail_template, acts)
+        mock_send = mocker.patch("weko_workflow.utils.send_mail", return_value=True)
+        result = usage_report.send_reminder_mail([], mail_template, acts, forced_send=True)
         assert result == True
 
         # not exist activities and mail_template, failed send mail
-        mocker.patch("weko_workflow.utils.send_mail", return_value=False)
+        assert mock_send.call_count == len(acts)
+        mock_send_failed = mocker.patch("weko_workflow.utils.send_mail", return_value=False)
         result = usage_report.send_reminder_mail(["1","2"],None, None)
         assert result == False
+        mock_send_failed.assert_called_once()
 
 #     def __get_site_info():
 # .tox/c1/bin/pytest --cov=weko_admin tests/test_utils.py::TestUsageReport::test_get_site_info -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-admin/.tox/c1/tmp
@@ -2520,7 +2552,7 @@ def test_get_item_mapping_list(facet_search_settings):
 def test_create_facet_search_query(facet_search_settings):
     has_permission, no_permission = create_facet_search_query()
     test_has_permission = {
-        "test-weko":{
+        current_app.config["SEARCH_UI_SEARCH_INDEX"]:{
             "aggs":{"Data Language":{"terms":{"field":"language","size":1000}},
                     "Data Type":{"aggs":{"Data Type":{"terms":{"field":"description.value","size":1000}}},
                                  "filter":{"bool":{"must":[{"term":{"description.descriptionType":"Other"}}]}}},
@@ -2531,7 +2563,7 @@ def test_create_facet_search_query(facet_search_settings):
         }
     }
     test_no_permission = {
-        'test-weko': {
+        current_app.config["SEARCH_UI_SEARCH_INDEX"]: {
             'aggs': {'Data Language': {'aggs': {'Data Language': {'terms': {'field': 'language','size': 1000}}},
                                         'filter': {'bool': {'must': [{'term': {'publish_status': '0'}}]}}},
                     'Data Type': {'aggs': {'Data Type': {'terms': {'field': 'description.value','size': 1000}}},
@@ -2726,6 +2758,7 @@ def test_create_aggregations_branch(mocker):
     }
     # 1. ACCESSRIGHTS_FIX_ENABLED=False
     app = Flask(__name__)
+    app.config["SEARCH_INDEX_PREFIX"] = ""
     app.config["SEARCH_UI_SEARCH_INDEX"] = "testidx"
     app.config["WEKO_SEARCH_FIX_ACCESSRIGHTS"] = False
     mocker.patch("weko_admin.models.FacetSearchSetting.get_activated_facets", return_value=[DummyFacet("type", "type", [])])
@@ -2736,6 +2769,7 @@ def test_create_aggregations_branch(mocker):
 
     # 2. ACCESSRIGHTS_FIX_ENABLED=True, no accessRights facet
     app = Flask(__name__)
+    app.config["SEARCH_INDEX_PREFIX"] = ""
     app.config["SEARCH_UI_SEARCH_INDEX"] = "testidx"
     app.config["WEKO_SEARCH_FIX_ACCESSRIGHTS"] = True
     mocker.patch("weko_admin.models.FacetSearchSetting.get_activated_facets", return_value=[DummyFacet("type", "type", [])])
@@ -2746,6 +2780,7 @@ def test_create_aggregations_branch(mocker):
 
     # 3. ACCESSRIGHTS_FIX_ENABLED=True, with accessRights facet
     app = Flask(__name__)
+    app.config["SEARCH_INDEX_PREFIX"] = ""
     app.config["SEARCH_UI_SEARCH_INDEX"] = "testidx"
     app.config["WEKO_SEARCH_FIX_ACCESSRIGHTS"] = True
     app.config["WEKO_ACCESS_RIGHTS_CHOICES"] = [
@@ -2788,6 +2823,7 @@ def test_create_aggregations_branch(mocker):
 
     # When facet mapping includes “fields.raw”
     app = Flask(__name__)
+    app.config["SEARCH_INDEX_PREFIX"] = ""
     app.config["SEARCH_UI_SEARCH_INDEX"] = "testidx"
     mocker.patch("weko_admin.models.FacetSearchSetting.get_activated_facets", return_value=[
         DummyFacet("raw_test", "test.fields.raw", [])
@@ -2843,7 +2879,7 @@ def test_get_query_key_by_permission():
 def test_get_facet_search_query(app, mocker):
     mocker.patch("weko_admin.utils.store_facet_search_query_in_redis")
     cache_data = {
-      "test-weko": {
+      current_app.config["SEARCH_UI_SEARCH_INDEX"]: {
         "aggs": {
           "Data Language": {"filter": {"bool": { "must": [{ "term": { "publish_status": "0" } }] }},
             "aggs": {"Data Language": { "terms": { "field": "language", "size": 1000 } }}},

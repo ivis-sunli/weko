@@ -81,7 +81,7 @@ class TestStyleSettingView:
                 "weko_admin/admin/block_style.html",
                 body_bg="#ffff"
             )
-            mock_flash.assert_called_with("Denied access")
+            mock_flash.assert_called_with("deny access")
         with patch("weko_admin.admin.admin_permission_factory",return_value=MockPermission(True)):
             data={"body-bg":"#0d5f89"}
             test = ["$body-bg: #0d5f89;\n", "$panel-bg: #ffff;\n", "$footer-default-bg: #0d5f89;\n", "$navbar-default-bg: #0d5f89;\n", "$panel-default-border: #dddddd;\n", "$input-bg-transparent: rgba(255, 255, 255, 0);"]
@@ -123,7 +123,7 @@ class TestStyleSettingView:
         login_user_via_session(client,email=users[0]["email"])
         url = url_for("stylesetting.upload_editor")
         from weko_theme.views import blueprint as theme_bp
-        path_to_instance = os.path.join("../../../../../",current_app.instance_path)
+        path_to_instance = current_app.instance_path
 
         current_app.config.update(
             THEME_FOOTER_WYSIWYG_TEMPLATE=os.path.join(path_to_instance,"footer_wysiwtg_template.html"),

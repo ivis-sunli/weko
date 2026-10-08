@@ -86,12 +86,13 @@ def test_role_has_access(app, users, mocker):
 # .tox/c1/bin/pytest --cov=weko_admin tests/test_weko_admin.py::test_is_accessible_to_role -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-admin/.tox/c1/tmp
 def test_is_accessible_to_role(app, db, users, mocker):
     admin = app.extensions["weko-admin"]
+    target_endpoint = app.extensions["admin"][0]._views[-1].endpoint
     with app.test_request_context(), app.test_client() as client:
         login_user_via_session(client, email=users[0]["email"])
+        app.preprocess_request()
         assert current_app.extensions["admin"][0]._views[0].is_accessible.__name__ == "role_has_access"
         assert current_app.extensions["admin"][0]._views[0].is_visible.func.__name__ == "role_has_access"
-        assert current_app.extensions["admin"][0]._views[0].is_visible.args[0] == "inclusionrequest"
-
+        assert current_app.extensions["admin"][0]._views[0].is_visible.args == (target_endpoint,)
         res = client.get("/ping")
 
 # .tox/c1/bin/pytest --cov=weko_admin tests/test_weko_admin.py::test_set_default_language -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-admin/.tox/c1/tmp

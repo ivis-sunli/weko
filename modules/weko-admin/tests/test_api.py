@@ -13,6 +13,9 @@ from weko_admin.api import (
     TempDirInfo,
     validate_csrf_header
 )
+import json
+from io import BytesIO
+from zipfile import ZipFile
 
 
 # .tox/c1/bin/pytest --cov=weko_admin tests/test_api.py -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-admin/.tox/c1/tmp
@@ -71,6 +74,7 @@ def test_is_crawler(client,log_crawler_list,restricted_ip_addr, mocker):
     mocker.patch("weko_admin.api.RedisConnection.connection",return_value=mock_redis)
     mock_res=Response()
     mock_res._content = b"122.1.91.145\n122.1.91.146"
+    mock_res.status_code = 200
     with patch("weko_admin.api.requests.get",return_value=mock_res):
         user_info={"user_agent":"","ip_address":""}
         result = _is_crawler(user_info)
@@ -81,7 +85,7 @@ def test_is_crawler(client,log_crawler_list,restricted_ip_addr, mocker):
         assert result == True
 
         mock_redis.srem_all(log_crawler_list[0].list_url)
-        with patch("weko_admin.api.RedisConnection.connection.smembers",side_effect=RedisError):
+        with patch.object(mock_redis, "smembers", side_effect=RedisError):
             result = _is_crawler(user_info)
             assert result == True
 
@@ -99,7 +103,7 @@ def test_is_crawler2(client,log_crawler_list,restricted_ip_addr, mocker):
     mock_redis = MockRedisSet()
     mocker.patch("weko_admin.api.RedisConnection.connection",return_value=mock_redis)
     mock_res=Response()
-    mock_res._content = b"API[\s]scraper\nOffline(\s|\\+)Navigator"
+    mock_res._content = b"API[\\s+]scraper\nOffline(\\s|\\+)Navigator\njava/1\\.1"
     mock_res.status_code = 200
     with patch("weko_admin.api.requests.get",return_value=mock_res):
         user_info={"user_agent":"API scraper","ip_address":""}
@@ -124,7 +128,7 @@ def test_is_crawler2(client,log_crawler_list,restricted_ip_addr, mocker):
 
 
         mock_redis.srem_all(log_crawler_list[0].list_url)
-        with patch("weko_admin.api.RedisConnection.connection.get",side_effect=RedisError):
+        with patch.object(mock_redis, "get", side_effect=RedisError):
             result = _is_crawler(user_info)
             assert result == False
 
@@ -138,24 +142,45 @@ def test_is_crawler2(client,log_crawler_list,restricted_ip_addr, mocker):
 
 #def send_site_license_mail(organization_name, mail_list, agg_date, data):
 # .tox/c1/bin/pytest --cov=weko_admin tests/test_api.py::test_send_site_license_mail -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-admin/.tox/c1/tmp
-def test_send_site_license_mail(client, mocker):
+def test_send_site_license_mail(client, mail_config, mocker):
     mocker.patch("weko_admin.api.get_system_default_language",return_value="en")
     organization_name="ORCID"
     mail_list=["test1@test.org","test2@test.org"]
     agg_date="2022-10"
-    data=["test_data"]
+    data = {
+        "name": organization_name,
+        "top_view": "17",
+        "search": "0",
+        "record_view": "4",
+        "file_download": "0",
+        "file_preview": "0",
+    }
     mock_send = mocker.patch("weko_admin.api.send_mail")
     mock_render = mocker.patch("weko_admin.api.render_template",return_value=make_response())
     send_site_license_mail(organization_name,mail_list,agg_date,data)
-    mock_send.assert_called_with("[ORCID] 2022-10 statistics report",mail_list,body="<Response 0 bytes [200 OK]>")
-    mock_render.assert_called_with(
+    attachments = mock_send.call_args.kwargs["attachments"]
+    mock_send.assert_called_once_with(
+        "[Weko3] 2022-10 site license statistics",
+        mail_list,
+        body="<Response 0 bytes [200 OK]>",
+        attachments=attachments,
+    )
+    assert len(attachments) == 1
+    attachment = attachments[0]
+    assert attachment.filename == "SiteAccess_2022-10.zip"
+    assert attachment.content_type == "application/x-zip-compressed"
+    with ZipFile(BytesIO(attachment.data)) as archive:
+        assert archive.namelist() == ["SiteAccess_2022-10.tsv"]
+        assert "ORCID\t17\t0\t4\t0\t0" in archive.read(archive.namelist()[0]).decode("utf-8-sig")
+    mock_render.assert_called_once_with(
         'weko_admin/email_templates/site_license_report.html',
-        agg_date="2022-10",
-        data=["test_data"],
-        lang_code="en"
+        organization_name=organization_name,
+        agg_date=agg_date,
+        administrator=mail_config.mail_default_sender,
     )
     with patch("weko_admin.api.get_system_default_language",side_effect=Exception("test_error")):
         send_site_license_mail(organization_name,mail_list,agg_date,data)
+    assert mock_send.call_count == 1
 
 class MockRedisHash:
     def __init__(self):
@@ -195,7 +220,7 @@ class TestTempDirInfo:
         mocker.patch("weko_admin.utils.RedisConnection.connection",return_value=mock_redis)
         temp = TempDirInfo("test_key")
         temp.set("test_temp_path","test_extra_info")
-        assert mock_redis.data["test_key"] == {"test_temp_path":"test_extra_info"}
+        assert mock_redis.data["test_key"] == {"test_temp_path":json.dumps("test_extra_info")}
 
 
 #    def delete(cls, temp_path):

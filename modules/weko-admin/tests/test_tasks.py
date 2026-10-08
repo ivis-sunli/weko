@@ -259,7 +259,7 @@ def test_check_send_site_access_report(client, admin_settings, mocker):
 
     # site_license_mail_setting.auto_send_flag is True
     AdminSettings.update("site_license_mail_settings", {"Root Index": {"auto_send_flag": True}})
-    mock_send = mocker.patch("weko_admin.tasks.manual_send_site_license_mail")
+    mock_send = mocker.patch("weko_admin.tasks.handle_site_license_mail")
     check_send_site_access_report()
     mock_send.assert_called()
 
@@ -267,6 +267,7 @@ def test_check_send_site_access_report(client, admin_settings, mocker):
 # .tox/c1/bin/pytest --cov=weko_admin tests/test_tasks.py::test_clean_temp_info -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-admin/.tox/c1/tmp
 def test_clean_temp_info(instance_path):
     #/tmp
+    now = datetime.now()
     dir_not_expire = os.path.join(instance_path,"not_expire")
     dir_expire_after_now = os.path.join(instance_path,"expire_after_now")
     dir_expire_before_now = os.path.join(instance_path,"expire_before_now")
@@ -278,9 +279,9 @@ def test_clean_temp_info(instance_path):
     data = {"test_key":{
         "/not_exist_path": {},# not exist path
         dir_not_expire: {},
-        dir_expire_after_now: {"expire":(datetime.now()+timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")},
-        dir_expire_before_now: {"expire":(datetime.now()+timedelta(days=-10)).strftime("%Y-%m-%d %H:%M:%S")},
-        dir_export_tmp: {"expire":(datetime.now()+timedelta(days=-10)).strftime("%Y-%m-%d %H:%M:%S"), "is_export": True}
+        dir_expire_after_now: {"expire":(now+timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")},
+        dir_expire_before_now: {"expire":(now+timedelta(days=-10)).strftime("%Y-%m-%d %H:%M:%S")},
+        dir_export_tmp: {"expire":(now+timedelta(days=-10)).strftime("%Y-%m-%d %H:%M:%S"), "is_export": True}
     }}
     class MockTempDirInfo():
         def __init__(self):
@@ -303,7 +304,7 @@ def test_clean_temp_info(instance_path):
             assert list(result.keys()) == [dir_not_expire, dir_expire_after_now]
             assert os.path.exists(dir_expire_before_now) is False
             mock_delete_exported.assert_called_with(dir_export_tmp,
-                {"expire":(datetime.now()+timedelta(days=-10)).strftime("%Y-%m-%d %H:%M:%S"), "is_export": True})
+                {"expire":(now+timedelta(days=-10)).strftime("%Y-%m-%d %H:%M:%S"), "is_export": True})
 
 
 INSPECT_RETURN_VALUE={'celery@d852e7dcb4da': [{'id': '0789eb75-2d50-45ba-b132-e85a70e71524', 'name': 'weko_admin.tasks.reindex', 'args': [False], 'kwargs': {}, 'type': 'weko_admin.tasks.reindex', 'hostname': 'celery@d852e7dcb4da', 'time_start': 1671494657.8838153, 'acknowledged': True, 'delivery_info': {'exchange': '', 'routing_key': 'celery', 'priority': 0, 'redelivered': False}, 'worker_pid': 264}]}
@@ -347,6 +348,7 @@ def test_reindex_EStoES(i18n_app,admin_settings, mocker):
     return_value.text = "test_mock"
     return_value.status_code = 200
 
+    mocker.patch("weko_admin.utils.requests.head", return_value=return_value)
     with patch("weko_admin.utils.requests.put" , return_value=return_value):
         with patch("weko_admin.utils.requests.post" , return_value=return_value):
             with patch("weko_admin.utils.requests.delete" , return_value=return_value):
@@ -360,14 +362,15 @@ def test_reindex_DBtoES(i18n_app,admin_settings,reindex_settings, mocker):
     return_value.text = "test_mock"
     return_value.status_code = 200
 
+    mocker.patch("weko_admin.utils.requests.head", return_value=return_value)
     with patch("weko_admin.utils.requests.put" , return_value=return_value):
         with patch("weko_admin.utils.requests.post" , return_value=return_value):
             with patch("weko_admin.utils.requests.delete" , return_value=return_value):
                 with patch("weko_admin.utils.requests.get" , return_value=return_value):
-                    with patch("invenio_oaiserver.receivers.update_affected_records" , return_value=""):
+                    with patch("invenio_oaiserver.receivers._new_percolator", return_value=""):
 
-                        retVal1= OAISet(spec="1669370353014",name="index name" ,search_pattern="path[1669370353014]")
-                        retVal2= OAISet(spec="1669959650594",name="index name" ,search_pattern="path[1669959650594]")
+                        retVal1= OAISet(spec="1669370353014",name="index name" ,search_pattern="path[1669370353014]",system_created=False)
+                        retVal2= OAISet(spec="1669959650594",name="index name" ,search_pattern="path[1669959650594]",system_created=False)
                         reindex_settings.session.add(retVal1)
                         reindex_settings.session.add(retVal2)
                         reindex_settings.session.commit()
@@ -376,14 +379,8 @@ def test_reindex_DBtoES(i18n_app,admin_settings,reindex_settings, mocker):
 
 def test_reindex_raise(i18n_app,admin_settings):
     with patch("weko_admin.tasks.search_reindex" , side_effect=BaseException("test_error")):
-        try :
+        with pytest.raises(BaseException, match="test_error"):
             reindex(True)
 
-            assert False , "expected Exception raised but"
-        except BaseException as ex:
-            assert "test_error" in ex.args
-            admin_setting = AdminSettings.get('search_reindex_settings',False)
-            assert True == admin_setting.get('has_errored')
-
-
-
+    admin_setting = AdminSettings.get("elastic_reindex_settings", False)
+    assert True == admin_setting.get('has_errored')

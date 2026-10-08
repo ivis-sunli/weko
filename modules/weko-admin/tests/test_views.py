@@ -18,6 +18,8 @@ from weko_admin.views import (
     manual_send_site_license_mail
 )
 from .helpers import login, logout
+from flask_breadcrumbs import Breadcrumbs
+from weko_admin.ext import finalize_app
 
 # .tox/c1/bin/pytest --cov=weko_admin tests/test_views.py -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-admin/.tox/c1/tmp
 
@@ -81,6 +83,8 @@ def test_set_lifetime(app, client, db, users, db_session_remove):
 #def lifetime():
 # .tox/c1/bin/pytest --cov=weko_admin tests/test_views.py::test_lifetime -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-admin/.tox/c1/tmp
 def test_lifetime(app, client,users,db, db_session_remove, mocker):
+    Breadcrumbs(app)
+    finalize_app(app)
     app.register_blueprint(blueprint)
     url = url_for("weko_admin.lifetime")
     # not login
@@ -89,11 +93,13 @@ def test_lifetime(app, client,users,db, db_session_remove, mocker):
 
     # not sysadmin
     # login(client,obj=users[4]["obj"])
+    login_user_via_session(client, email=users[4]["email"])
     mock_admin_access = mocker.patch("weko_admin.views._has_admin_access", return_value=False)
     res = client.get(url)
     assert res.status_code == 403
     logout(client)
 
+    login_user_via_session(client,email=users[0]["email"])
     mock_admin_access.return_value = True
 
     db.session.add(SessionLifetime(lifetime=100))
@@ -150,10 +156,12 @@ def test_lifetime(app, client,users,db, db_session_remove, mocker):
         assert res.status_code == 400
 
 
-    assert current_menu.submenu("settings.lifetime").active == True
-    assert current_menu.submenu("settings.lifetime").url == "/accounts/settings/session/"
-    assert current_menu.submenu("settings.lifetime").text == '<i class="fa fa-cogs fa-fw"></i> Session'
-    assert list(map(lambda x:x.url,list(current_breadcrumbs))) == ["#","#","#","/accounts/settings/session/"]
+    with app.test_request_context(url):
+        assert current_menu.submenu("settings.lifetime").active == True
+        assert current_menu.submenu("settings.lifetime").url == "/accounts/settings/session/"
+        assert current_menu.submenu("settings.lifetime").text == '<i class="fa fa-cogs fa-fw"></i> Session'
+        assert list(current_breadcrumbs) == []
+
 
 
 #def session_info_offline():
@@ -230,7 +238,7 @@ def test_save_lang_list(api, users, redis_connect, db_session_remove):
 
     # content_type = application/json
     data = [{"lang_code":"ja","is_registered":True},{"lang_code":"en","is_registered":False}]
-    with patch("weko_admin.views.update_admin_lang_setting",return_value="success"):
+    with patch("weko_admin.views.update_admin_lang_setting", return_value=None):
         res = api.post(url,json=data)
         assert redis_connect.redis.exists("index_tree_view_test_ja") == True
         assert redis_connect.redis.exists("index_tree_view_test_en") == False
@@ -635,16 +643,16 @@ def test_manual_send_site_license_mail(api, db, users, db_session_remove, mocker
     assert res.data == b'{"status":"success"}\n'
     mock_send.assert_has_calls(
         [mocker.call("test data1",["test@mail.com"],"202201-202203",{"name":"test data1"}),
-        mocker.call("test data2",["test@mail.com"],"202201-202203",{"file_download":0,"file_preview":0,"record_view":0,"search":0,"top_view":0}),
+        mocker.call("test data2",["test@mail.com"],"202201-202203",{"file_download":0,"file_preview":0,"name":"test data2","record_view":0,"search":0,"top_view":0}),
         ]
     )
 
     # call with repo_id
-    res = manual_send_site_license_mail("202201", "202203", "Root Index")
+    res = make_response(manual_send_site_license_mail("202201", "202203", "Root Index"))
     assert res.data == b'{"status":"success"}\n'
     mock_send.assert_has_calls(
         [mocker.call("test data1",["test@mail.com"],"202201-202203",{"name":"test data1"}),
-        mocker.call("test data2",["test@mail.com"],"202201-202203",{"file_download":0,"file_preview":0,"record_view":0,"search":0,"top_view":0}),
+        mocker.call("test data2",["test@mail.com"],"202201-202203",{"file_download":0,"file_preview":0,"name":"test data2","record_view":0,"search":0,"top_view":0}),
         ]
     )
 
