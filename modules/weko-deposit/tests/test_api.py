@@ -48,6 +48,7 @@ from invenio_files_rest.models import Bucket, Location, ObjectVersion, FileInsta
 from invenio_pidstore.models import PersistentIdentifier, PIDStatus
 from invenio_pidstore.errors import PIDInvalidAction
 from invenio_pidrelations.serializers.utils import serialize_relations
+from invenio_pidrelations.models import PIDRelation
 from invenio_records.api import RecordRevision
 from invenio_records.errors import MissingModelError
 from invenio_records.models import RecordMetadata
@@ -240,7 +241,7 @@ class TestWekoIndexer:
             relations_ver['id'] = pid.object_uuid
             relations_ver['is_last'] = relations_ver.get('index') == 0
             assert indexer.update_relation_version_is_last(relations_ver) == {
-                '_index': 'test-weko-item-v1.0.0',
+                '_index': indexer.search_index,
                 '_id': str(pid.object_uuid),
                 '_version': 2,
                 'result': 'noop',
@@ -260,7 +261,7 @@ class TestWekoIndexer:
         record = records[0]['record']
         # update_oai=False
         result = indexer.update_search_data(record, update_revision=False, update_oai=False, is_deleted=False)
-        assert result["_index"] == "test-weko-item-v1.0.0"
+        assert result["_index"] == indexer.search_index
         assert result["_id"] == str(records[0]["rec_uuid"])
         assert result["_primary_term"] == 1
         assert result["_seq_no"] == 9
@@ -270,7 +271,7 @@ class TestWekoIndexer:
 
         # update_oai=True
         result = indexer.update_search_data(record, update_revision=False, update_oai=True, is_deleted=False)
-        assert result["_index"] == "test-weko-item-v1.0.0"
+        assert result["_index"] == indexer.search_index
         assert result["_id"] == str(records[0]["rec_uuid"])
         assert result["_primary_term"] == 1
         assert result["_seq_no"] == 10
@@ -284,7 +285,7 @@ class TestWekoIndexer:
         db.session.merge(record.model)
         db.session.commit()
         result = indexer.update_search_data(record, update_revision=True, update_oai=True, is_deleted=False)
-        assert result["_index"] == "test-weko-item-v1.0.0"
+        assert result["_index"] == indexer.search_index
         assert result["_id"] == str(records[1]["rec_uuid"])
         assert result["_primary_term"] == 1
         assert result["_seq_no"] == 11
@@ -338,7 +339,8 @@ class TestWekoIndexer:
     #     def get_pid_by_search_scroll(self, path):
     #         def get_result(result):
     # .tox/c1/bin/pytest --cov=weko_deposit tests/test_api.py::TestWekoIndexer::test_get_pid_by_search_scroll -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
-    def test_get_pid_by_search_scroll(self, search_records):
+    def test_get_pid_by_search_scroll(self, versioned_search_records):
+        search_records = versioned_search_records
         def get_recids(ret):
             recids = []
             for obj_uuid in ret:
@@ -378,7 +380,7 @@ class TestWekoIndexer:
         record = records[0]['record']
         record_data = records[0]['record_data']
         ret1 = indexer.get_metadata_by_item_id(record.id)
-        assert ret1['_index'] == 'test-weko-item-v1.0.0'
+        assert ret1['_index'] == indexer.search_index
 
         ret2 = indexer.get_metadata_by_item_id("100", is_ignore=True)
         assert ret2['found'] is False
@@ -391,7 +393,7 @@ class TestWekoIndexer:
             feedback_mail = {'id': record.id, 'mail_list': [
                 {'email': 'wekosoftware@nii.ac.jp', 'author_id': ''}]}
             ret = indexer.update_feedback_mail_list(feedback_mail)
-            assert ret == {'_index': 'test-weko-item-v1.0.0', '_id': '{}'.format(
+            assert ret == {'_index': indexer.search_index, '_id': '{}'.format(
                 record.id), '_version': 3, 'result': 'updated', '_shards': {'total': 2, 'successful': 1, 'failed': 0}, '_seq_no': 9, '_primary_term': 1}
 
     #     def update_request_mail_list(self, request_mail):
@@ -415,7 +417,7 @@ class TestWekoIndexer:
             }
             # todo19
             ret = indexer.update_author_link(author_link_info)
-            assert ret == {'_index': 'test-weko-item-v1.0.0', '_type': 'item-v1.0.0', '_id': '{}'.format(record.id), '_version': 3, 'result': 'updated', '_shards': {'total': 2, 'successful': 1, 'failed': 0}, '_seq_no': 9, '_primary_term': 1}
+            assert ret == {'_index': indexer.search_index, '_id': '{}'.format(record.id), '_version': 3, 'result': 'updated', '_shards': {'total': 2, 'successful': 1, 'failed': 0}, '_seq_no': 9, '_primary_term': 1}
 
 
     #     def update_jpcoar_identifier(self, dc, item_id):
@@ -424,7 +426,7 @@ class TestWekoIndexer:
             indexer, records = search_records
             record_data = records[0]['record_data']
             record = records[0]['record']
-            assert indexer.update_jpcoar_identifier(record_data, record.id) == {'_index': 'test-weko-item-v1.0.0', '_id': '{}'.format(
+            assert indexer.update_jpcoar_identifier(record_data, record.id) == {'_index': indexer.search_index, '_id': '{}'.format(
                 record.id), '_version': 3, 'result': 'updated', '_shards': {'total': 2, 'successful': 1, 'failed': 0}, '_seq_no': 9, '_primary_term': 1}
 
 
@@ -661,7 +663,7 @@ class TestWekoDeposit():
             assert 0 == deposit.revision_id
             deposit.publish()
             assert 'published' == deposit.status
-            assert deposit.revision_id == 2
+            assert deposit.revision_id == 3
 
 
     # def publish_without_commit(self, pid=None, id_=None):
@@ -680,11 +682,11 @@ class TestWekoDeposit():
                 deposit.publish_without_commit()
                 assert deposit['_deposit']['id']
                 assert 'published' == deposit.status
-                assert deposit.revision_id == 2
+                assert deposit.revision_id == 3
 
                 # self.data is None, "control_number" in self
                 # "$schema" not in self, "version" not in relations
-                with patch("weko_deposit.api.serialize_relations", return_value={}):
+                with patch("weko_deposit.api.WekoDeposit.serialize_relations", return_value={}):
                     deposit = WekoDeposit.create({})
                     deposit["control_number"] = "2"
                     if '$schema' in deposit:
@@ -692,7 +694,7 @@ class TestWekoDeposit():
                     deposit.publish_without_commit()
                     assert deposit['_deposit']['id']
                     assert 'published' == deposit.status
-                    assert deposit.revision_id == 2
+                    assert deposit.revision_id == 3
                     assert deposit.data is not None
 
 
@@ -870,8 +872,8 @@ class TestWekoDeposit():
             deposit.delete()
             ret2 = open_search.get_source(index=app.config['INDEXER_DEFAULT_INDEX'],
                                  id=deposit.id, ignore=[404])
-            assert ret2 == {'error': {'root_cause': [{'type': 'resource_not_found_exception', 'reason': 'Document not found [test-weko-item-v1.0.0]/[{}]'.format(
-                deposit.id)}], 'type': 'resource_not_found_exception', 'reason': 'Document not found [test-weko-item-v1.0.0]/[{}]'.format(deposit.id)}, 'status': 404}
+            assert ret2 == {'error': {'root_cause': [{'type': 'resource_not_found_exception', 'reason': 'Document not found [{index}]/[{}]'.format(
+                deposit.id, index=app.config['INDEXER_DEFAULT_INDEX'])}], 'type': 'resource_not_found_exception', 'reason': 'Document not found [{index}]/[{}]'.format(deposit.id, index=app.config['INDEXER_DEFAULT_INDEX'])}, 'status': 404}
 
             record = records[1]
             deposit = record['deposit']
@@ -888,8 +890,8 @@ class TestWekoDeposit():
             deposit.delete()
             ret2 = open_search.get_source(index=app.config['INDEXER_DEFAULT_INDEX'],
                                  id=deposit.id, ignore=[404])
-            assert ret2 == {'error': {'root_cause': [{'type': 'resource_not_found_exception', 'reason': 'Document not found [test-weko-item-v1.0.0]/[{}]'.format(
-                deposit.id)}], 'type': 'resource_not_found_exception', 'reason': 'Document not found [test-weko-item-v1.0.0]/[{}]'.format(deposit.id)}, 'status': 404}
+            assert ret2 == {'error': {'root_cause': [{'type': 'resource_not_found_exception', 'reason': 'Document not found [{index}]/[{}]'.format(
+                deposit.id, index=app.config['INDEXER_DEFAULT_INDEX'])}], 'type': 'resource_not_found_exception', 'reason': 'Document not found [{index}]/[{}]'.format(deposit.id, index=app.config['INDEXER_DEFAULT_INDEX'])}, 'status': 404}
 
 
             # recid.status == PIDStatus.RESERVED is false
@@ -915,12 +917,12 @@ class TestWekoDeposit():
 
             ret2 = open_search.get_source(index=app.config['INDEXER_DEFAULT_INDEX'],
                                  id=deposit.id, ignore=[404])
-            assert ret2 == {'error': {'root_cause': [{'type': 'resource_not_found_exception', 'reason': 'Document not found [test-weko-item-v1.0.0]/[{}]'.format(
-                deposit.id)}], 'type': 'resource_not_found_exception', 'reason': 'Document not found [test-weko-item-v1.0.0]/[{}]'.format(deposit.id)}, 'status': 404}
+            assert ret2 == {'error': {'root_cause': [{'type': 'resource_not_found_exception', 'reason': 'Document not found [{index}]/[{}]'.format(
+                deposit.id, index=app.config['INDEXER_DEFAULT_INDEX'])}], 'type': 'resource_not_found_exception', 'reason': 'Document not found [{index}]/[{}]'.format(deposit.id, index=app.config['INDEXER_DEFAULT_INDEX'])}, 'status': 404}
 
     # def commit(self, *args, **kwargs):
     # .tox/c1/bin/pytest --cov=weko_deposit tests/test_api.py::TestWekoDeposit::test_commit -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
-    def test_commit(self, app, db, location, db_index, db_activity, db_itemtype, mocker, bucket):
+    def test_commit(self, app, db, location, db_index, db_activity, db_itemtype, mocker, bucket, authors):
         app.config["WEKO_SCHEMA_JPCOAR_V2_SCHEMA_NAME"] = 'jpcoar_mapping'
         app.config["WEKO_SCHEMA_JPCOAR_V2_RESOURCE_TYPE_REPLACE"] = {
             'periodical':'journal',
@@ -938,7 +940,7 @@ class TestWekoDeposit():
             deposit.commit()
             assert deposit['_deposit']['id'] == "1"
             assert 'draft' == deposit.status
-            assert 2 == deposit.revision_id
+            assert 3 == deposit.revision_id
 
 
             # deposit_bucket and deposit_bucket.location: is false
@@ -1160,6 +1162,8 @@ class TestWekoDeposit():
             data = {'pubdate': '2023-12-07', 'item_1617186331708': [{'subitem_1551255647225': 'test', 'subitem_1551255648112': 'ja'}], 'item_1617258105262': {'resourcetype': 'conference paper', 'resourceuri': 'http://purl.org/coar/resource_type/c_5794'}, 'shared_user_id': -1, 'title': 'test', 'lang': 'ja', 'deleted_items': ['item_1617186385884', 'item_1617186419668', 'item_1617186499011', 'item_1617186609386', 'item_1617186626617', 'item_1617186643794',
                                                                                                                                                                                                                                                                                                                                         'item_1617186660861', 'item_1617186702042', 'item_1617186783814', 'item_1617186859717', 'item_1617186882738', 'item_1617186901218', 'item_1617186920753', 'item_1617186941041', 'item_1617187112279', 'item_1617187187528', 'item_1617349709064', 'item_1617353299429', 'item_1617605131499', 'item_1617610673286', 'item_1617620223087', 'item_1617944105607', 'item_1617187056579', 'approval1', 'approval2'], '$schema': '/items/jsonschema/1'}
             deposit.update(index_obj, data)
+            deposit.commit()
+            assert RecordMetadata.query.get(item_id).json['path'] == ['1']
             FeedbackMailList.update(
                 item_id, [{"email": "test.taro@test.org", "author_id": "1"}])
             db.session.commit()
@@ -1184,6 +1188,7 @@ class TestWekoDeposit():
             data = {'content': {'content': 'content'}, 'pubdate': '2023-12-07', 'item_1617186331708': [{'subitem_1551255647225': 'test', 'subitem_1551255648112': 'ja'}], 'item_1617258105262': {'resourcetype': 'conference paper', 'resourceuri': 'http://purl.org/coar/resource_type/c_5794'}, 'shared_user_id': -1, 'title': 'test', 'lang': 'ja', 'deleted_items': ['item_1617186385884', 'item_1617186419668', 'item_1617186499011', 'item_1617186609386', 'item_1617186626617',
                                                                                                                                                                                                                                                                                                                                                                             'item_1617186643794', 'item_1617186660861', 'item_1617186702042', 'item_1617186783814', 'item_1617186859717', 'item_1617186882738', 'item_1617186901218', 'item_1617186920753', 'item_1617186941041', 'item_1617187112279', 'item_1617187187528', 'item_1617349709064', 'item_1617353299429', 'item_1617605131499', 'item_1617610673286', 'item_1617620223087', 'item_1617944105607', 'item_1617187056579', 'approval1', 'approval2'], '$schema': '/items/jsonschema/1'}
             deposit.update(index_obj, data)
+            deposit.commit()
             FeedbackMailList.update(
                 item_id, [{"email": "test.taro@test.org", "author_id": "1"}])
             session["activity_info"] = {
@@ -1211,6 +1216,7 @@ class TestWekoDeposit():
                                                                                                                                                                                                                                                                                                                                                                                             'item_1617186643794', 'item_1617186660861', 'item_1617186702042', 'item_1617186783814', 'item_1617186859717', 'item_1617186882738', 'item_1617186901218', 'item_1617186920753', 'item_1617186941041', 'item_1617187112279', 'item_1617187187528', 'item_1617349709064', 'item_1617353299429', 'item_1617605131499', 'item_1617610673286', 'item_1617620223087', 'item_1617944105607', 'item_1617187056579', 'approval1', 'approval2'], '$schema': '/items/jsonschema/1'}
             # deposit['_buckets']['deposit'] = "3e99cfca-098b-42ed-b8a0-20ddd09b3e01"
             deposit.update(index_obj, data)
+            deposit.commit()
             FeedbackMailList.update(
                 item_id, [{"email": "test.taro@test.org", "author_id": "1"}])
             session["activity_info"] = {
@@ -1279,14 +1285,14 @@ class TestWekoDeposit():
             assert not any(("file" in e.keys()) for e in deposit.jrc.get('content'))
 
             with patch("weko_deposit.api.WekoIndexer.upload_metadata") as mock_upload:
-                mock_upload.side_effect = [seacrh.exceptions.TransportError(500,"test_error",{"error":{"reason": WEKO_DEPOSIT_SEARCH_PARSING_ERROR_KEYWORD}}), "Mocked Data"]
+                mock_upload.side_effect = [search.TransportError(500,"test_error",{"error":{"reason": app.config["WEKO_DEPOSIT_SEARCH_PARSING_ERROR_KEYWORD"]}}), "Mocked Data", search.TransportError(500, "test_error", {"error": {"reason": ""}})]
                 deposit.commit()
 
                 with pytest.raises(WekoDepositError):
                     result = deposit.commit()
 
             with patch("weko_deposit.api.WekoIndexer.upload_metadata") as mock_upload:
-                mock_upload.side_effect = [seacrh.exceptions.TransportError(500,"test_error",{"error":{"reason":""}}), "test error"]
+                mock_upload.side_effect = [search.TransportError(500,"test_error",{"error":{"reason":""}}), "test error"]
                 with pytest.raises(WekoDepositError) as ex:
                     deposit.commit()
 
@@ -1298,7 +1304,7 @@ class TestWekoDeposit():
     # def newversion(self, pid=None, is_draft=False):
     #             # NOTE: We call the superclass `create()` method, because
     # .tox/c1/bin/pytest --cov=weko_deposit tests/test_api.py::TestWekoDeposit::test_newversion -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
-    def test_newversion(self, app, db, location, db_itemtype, search_records, users, mocker):
+    def test_newversion(self, app, db, location, db_itemtype, search_records, users, mocker, request_context):
         mock_task = mocker.patch("weko_deposit.tasks.extract_pdf_and_update_file_contents")
         mock_task.apply_async = MagicMock()
 
@@ -1360,6 +1366,8 @@ class TestWekoDeposit():
         recid_1 = PersistentIdentifier.create('recid', "11", object_type='rec', object_uuid=rec_uuid, status=PIDStatus.REGISTERED)
         depid_1 = PersistentIdentifier.create('depid', "11", object_type='rec', object_uuid=rec_uuid, status=PIDStatus.REGISTERED)
         search_records[1][0]['record_data']['owners'] = [1]
+        search_records[1][0]['record_data']['owner'] = 1
+        search_records[1][0]['record_data']['_deposit']['owner'] = 1
         search_records[1][0]['record_data']['created_by'] = 1
         search_records[1][0]['record_data']['recid'] = 11
         search_records[1][0]['record_data']['_deposit']['id'] = 11
@@ -1377,16 +1385,19 @@ class TestWekoDeposit():
 
         db.session.add(recid_1)
         db.session.add(depid_1)
+        parent = PersistentIdentifier.create('parent', 'parent:11', object_type='rec', object_uuid=rec_uuid, status=PIDStatus.REGISTERED)
+        db.session.add(PIDRelation.create(recid_1, depid_1, 1))
+        rel = PIDRelation.create(parent, recid_1, 0, 0)
         db.session.add(rel)
         db.session.commit()
 
         with app.test_request_context():
-            with patch("flask_login.utils._get_user", return_value=users[2]["obj"]):
-                with patch("flask_security.current_user", return_value=users[2]["obj"]):
+            with patch("invenio_deposit.api.current_user", users[2]["obj"]):
+                with patch("weko_deposit.api.current_user", users[2]["obj"]):
                     with patch("weko_index_tree.api.Indexes.get_path_list", return_value=[2]):
                         session["activity_info"] = {"activity_id":0}
 
-                        ret = deposit.newversion(depid_1)
+                        ret = dep.newversion(recid_1)
                         assert '11.1' == ret['recid']
                         assert 1 == ret['owner']
                         assert [1] == ret['owners']
@@ -1394,7 +1405,7 @@ class TestWekoDeposit():
                         assert '11.1' == ret['_deposit']['id']
                         assert 1 == ret['_deposit']['owner']
                         assert [1] == ret['_deposit']['owners']
-                        assert 5 == ret['_deposit']['created_by']
+                        assert 1 == ret['_deposit']['created_by']
                         assert [] == ret['_deposit']['weko_shared_ids']
 
                         # return None
@@ -1402,13 +1413,13 @@ class TestWekoDeposit():
                         assert None == deposit.newversion(depid_none)
 
                         # is_draft = true
-                        ret = deposit.newversion(depid_1, is_draft=True)
+                        ret = dep.newversion(recid_1, is_draft=True)
                         assert '11.0' == ret['recid']
                         assert '11.0' == ret['_deposit']['id']
 
                         # SQLAlchemyError
                         with patch('weko_deposit.api.Deposit.create', side_effect=SQLAlchemyError):
-                            assert None == deposit.newversion(depid_1)
+                            assert None == dep.newversion(recid_1)
 
     # def get_content_files(self):
     # .tox/c1/bin/pytest --cov=weko_deposit tests/test_api.py::TestWekoDeposit::test_get_content_files -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
@@ -1423,9 +1434,9 @@ class TestWekoDeposit():
             patch("weko_workflow.utils.get_non_extract_files_by_recid", return_value=[]):
 
             # Configure app config mocks
-            app.config.WEKO_MIMETYPE_WHITELIST_FOR_SEARCH = ["text/plain", "application/pdf"]
-            app.config.WEKO_DEPOSIT_TEXTMIMETYPE_WHITELIST_FOR_SEARCH = ["text/plain"]
-            app.config.WEKO_DEPOSIT_FILESIZE_LIMIT = 1024
+            app.config["WEKO_MIMETYPE_WHITELIST_FOR_SEARCH"] = ["text/plain", "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+            app.config["WEKO_DEPOSIT_TEXTMIMETYPE_WHITELIST_FOR_SEARCH"] = ["text/plain"]
+            app.config["WEKO_DEPOSIT_FILESIZE_LIMIT"] = 1024
 
             # No file data
             mock_self.get_file_data.return_value = None
@@ -1446,9 +1457,9 @@ class TestWekoDeposit():
             assert ret["test_file_1.2M.pdf"].get("is_pdf") == True
             assert ret["test_file_82K.pdf"].get("is_pdf") == True
 
-            for info in ret.values():
+            for filename, info in ret.items():
                 assert "uri" in info and info["uri"]
-                assert "size" in info and info["size"] < 1024
+                assert "size" in info and info["size"] == deposit.files[filename].obj.file.size
 
 
             # Text file extraction (success)
@@ -2082,7 +2093,8 @@ class TestWekoDeposit():
 
     # def delete_by_index_tree_id(cls, index_id: str, ignore_items: list = []):
     # .tox/c1/bin/pytest --cov=weko_deposit tests/test_api.py::TestWekoDeposit::test_delete_by_index_tree_id -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
-    def test_delete_by_index_tree_id(sel,app,db,location,search_records):
+    def test_delete_by_index_tree_id(sel,app,db,location,versioned_search_records):
+        search_records = versioned_search_records
         def check_status(pid, status):
             assert PersistentIdentifier.get('depid', pid).status == status
 
@@ -2501,7 +2513,7 @@ class TestWekoRecord:
             result = results[0]
             record = result['record']
             # assert record.navi==[]
-            with app.test_request_context(query_string={"community": "test_com"}):
+            with app.test_request_context(query_string={"c": "test_com"}):
                 assert record.navi == []
 
 
@@ -2813,8 +2825,7 @@ class TestWekoRecord:
     def test_items_show_list(self, app, search_records, search_records_2, search_records_5, search_records_6, users, db_itemtype, db_admin_settings):
             record = WekoRecord({})
             with app.test_request_context():
-                with pytest.raises(AttributeError):
-                    assert record.items_show_list == ""
+                assert record.items_show_list == []
 
             _, results = search_records
             result = results[0]
@@ -2837,7 +2848,7 @@ class TestWekoRecord:
             record = result['record']
             version_id = str(result['version_id'])
             with patch("flask_login.utils._get_user", return_value=users[1]["obj"]):
-                assert record.items_show_list == [{'attribute_name': 'PubDate', 'attribute_value': '2022-08-20', 'attribute_name_i18n': 'PubDate'}, {'attribute_name': 'Creator', 'attribute_name_i18n': 'Creator', 'attribute_type': 'creator', 'attribute_value_mlt': [{'name': [], 'order_lang': []}, {'name': ['givenNames'], 'order_lang': [{'NoLanguage': {'givenName': ['givenNames'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': ['mei'], 'order_lang': [{'NoLanguage': {'familyName': ['mei'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': ['mei'], 'order_lang': [{'NoLanguage': {'familyName': ['mei'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': [], 'order_lang': []}, {'name': ['name'], 'order_lang': [{'NoLanguage': {'creatorName': ['name'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': [], 'order_lang': [], 'nameIdentifiers': [{'nameIdentifier': '識別'}, {'nameIdentifierURI': 'tets.com'}]}, {'name': [], 'order_lang': []}, {'name': ['別名'], 'order_lang': [{'NoLanguage': {'creatorAlternative': ['別名'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}]}, {'attribute_name': 'Resource Type', 'attribute_name_i18n': 'Resource Type', 'attribute_type': None, 'attribute_value_mlt': [[[[{'Resource Type': 'conference paper'}], [{'Resource Type Identifier': 'http://purl.org/coar/resource_type/c_5794'}]]]]}, {'attribute_name': 'thumbnail', 'attribute_name_i18n': 'thumbnail', 'attribute_type': 'object', 'is_thumbnail': True}]
+                assert record.items_show_list == [{'attribute_name': 'PubDate', 'attribute_value': '2022-08-20', 'attribute_name_i18n': 'PubDate'}, {'attribute_name': 'Creator', 'attribute_name_i18n': 'Creator', 'attribute_type': 'creator', 'attribute_value_mlt': [{'name': [], 'type': '', 'order_lang': []}, {'name': ['givenNames'], 'type': '', 'order_lang': [{'NoLanguage': {'givenName': ['givenNames'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': ['mei'], 'type': '', 'order_lang': [{'NoLanguage': {'familyName': ['mei'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': ['mei'], 'type': '', 'order_lang': [{'NoLanguage': {'familyName': ['mei'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': [], 'type': '', 'order_lang': []}, {'name': ['name'], 'type': '', 'order_lang': [{'NoLanguage': {'creatorName': ['name'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': [], 'type': '', 'order_lang': [], 'nameIdentifiers': [{'nameIdentifier': '識別'}, {'nameIdentifierURI': 'tets.com'}]}, {'name': [], 'type': '', 'order_lang': []}, {'name': ['別名'], 'type': '', 'order_lang': [{'NoLanguage': {'creatorAlternative': ['別名'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}]}, {'attribute_name': 'Resource Type', 'attribute_name_i18n': 'Resource Type', 'attribute_type': None, 'attribute_value_mlt': [[[[{'Resource Type': 'conference paper'}], [{'Resource Type Identifier': 'http://purl.org/coar/resource_type/c_5794'}]]]]}, {'attribute_name': 'thumbnail', 'attribute_name_i18n': 'thumbnail', 'attribute_type': 'object', 'is_thumbnail': True}]
 
             #
             _, results = search_records_5
@@ -2845,7 +2856,7 @@ class TestWekoRecord:
             record = result['record']
             version_id = str(result['version_id'])
             with patch("flask_login.utils._get_user", return_value=users[1]["obj"]):
-                assert record.items_show_list == [{'attribute_name': 'PubDate', 'attribute_value': '2022-08-20', 'attribute_name_i18n': 'PubDate'}, {'attribute_name': 'Creator', 'attribute_name_i18n': 'Creator', 'attribute_type': 'creator', 'attribute_value_mlt': [{'name': [], 'order_lang': []}, {'name': ['givenNames'], 'order_lang': [{'NoLanguage': {'givenName': ['givenNames'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': ['mei'], 'order_lang': [{'NoLanguage': {'familyName': ['mei'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': ['mei'], 'order_lang': [{'NoLanguage': {'familyName': ['mei'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': [], 'order_lang': []}, {'name': ['name'], 'order_lang': [{'NoLanguage': {'creatorName': ['name'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': [], 'order_lang': [], 'nameIdentifiers': [{'nameIdentifier': '識別'}, {'nameIdentifierURI': 'tets.com'}]}, {'name': [], 'order_lang': []}, {'name': ['別名'], 'order_lang': [{'NoLanguage': {'creatorAlternative': ['別名'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}]}, {'attribute_name': 'Reference', 'attribute_name_i18n': 'Resource Type', 'attribute_type': None, 'attribute_value_mlt': [[{'item_1617258105262.resourcetype': 'conference paper', 'item_1617258105262.resourceuri': 'http://purl.org/coar/resource_type/c_5794'}]]}, {'attribute_name': 'Bibliographic Information', 'attribute_name_i18n': 'Bibliographic Information', 'attribute_type': 'object', 'attribute_value_mlt': [{'title_attribute_name': [], 'magazine_attribute_name': [{'p.': '終了ページ'}], 'length': 1}, {'title_attribute_name': ['タイトル', 'ja : '], 'magazine_attribute_name': [], 'length': 0}, {'title_attribute_name': [], 'magazine_attribute_name': [{'p.': '開始ページ'}], 'length': 1}, {'title_attribute_name': [], 'magazine_attribute_name': [], 'length': 0}, {'title_attribute_name': [], 'magazine_attribute_name': [{'Issue Number': '号'}], 'length': 1}, {'title_attribute_name': [], 'magazine_attribute_name': [{'Number of Page': 'ページ数'}], 'length': 1}]}, {'attribute_name': 'thumbnail', 'attribute_name_i18n': 'thumbnail', 'attribute_type': 'object', 'attribute_value_mlt': []}]
+                assert record.items_show_list == [{'attribute_name': 'PubDate', 'attribute_value': '2022-08-20', 'attribute_name_i18n': 'PubDate'}, {'attribute_name': 'Creator', 'attribute_name_i18n': 'Creator', 'attribute_type': 'creator', 'attribute_value_mlt': [{'name': [], 'type': '', 'order_lang': []}, {'name': ['givenNames'], 'type': '', 'order_lang': [{'NoLanguage': {'givenName': ['givenNames'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': ['mei'], 'type': '', 'order_lang': [{'NoLanguage': {'familyName': ['mei'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': ['mei'], 'type': '', 'order_lang': [{'NoLanguage': {'familyName': ['mei'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': [], 'type': '', 'order_lang': []}, {'name': ['name'], 'type': '', 'order_lang': [{'NoLanguage': {'creatorName': ['name'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': [], 'type': '', 'order_lang': [], 'nameIdentifiers': [{'nameIdentifier': '識別'}, {'nameIdentifierURI': 'tets.com'}]}, {'name': [], 'type': '', 'order_lang': []}, {'name': ['別名'], 'type': '', 'order_lang': [{'NoLanguage': {'creatorAlternative': ['別名'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}]}, {'attribute_name': 'Reference', 'attribute_name_i18n': 'Resource Type', 'attribute_type': None, 'attribute_value_mlt': [[{'item_1617258105262.resourcetype': 'conference paper', 'item_1617258105262.resourceuri': 'http://purl.org/coar/resource_type/c_5794'}]]}, {'attribute_name': 'Bibliographic Information', 'attribute_name_i18n': 'Bibliographic Information', 'attribute_type': 'object', 'attribute_value_mlt': [{'title_attribute_name': [], 'magazine_attribute_name': [{'p.': '終了ページ'}], 'length': 1}, {'title_attribute_name': ['タイトル', 'ja : '], 'magazine_attribute_name': [], 'length': 0}, {'title_attribute_name': [], 'magazine_attribute_name': [{'p.': '開始ページ'}], 'length': 1}, {'title_attribute_name': [], 'magazine_attribute_name': [], 'length': 0}, {'title_attribute_name': [], 'magazine_attribute_name': [{'Issue Number': '号'}], 'length': 1}, {'title_attribute_name': [], 'magazine_attribute_name': [{'Number of Page': 'ページ数'}], 'length': 1}]}, {'attribute_name': 'thumbnail', 'attribute_name_i18n': 'thumbnail', 'attribute_type': 'object', 'attribute_value_mlt': []}]
 
             # contain 'input_type' == 'text', 'interim', contain BibliographicInfo
             _, results = search_records_6
@@ -2853,15 +2864,14 @@ class TestWekoRecord:
             record = result['record']
             version_id = str(result['version_id'])
             # with patch("weko_deposit.api._FormatSysBibliographicInformation.is_bibliographic", return_value=True):
-            assert record.items_show_list == [{'attribute_name': 'PubDate', 'attribute_value': '2022-08-20', 'attribute_name_i18n': 'PubDate'}, {'attribute_name': 'Creator', 'attribute_name_i18n': 'Creator', 'attribute_type': 'creator', 'attribute_value_mlt': [{'name': [], 'order_lang': []}, {'name': ['givenNames'], 'order_lang': [{'NoLanguage': {'givenName': ['givenNames'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': ['mei'], 'order_lang': [{'NoLanguage': {'familyName': ['mei'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': ['mei'], 'order_lang': [{'NoLanguage': {'familyName': ['mei'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': [], 'order_lang': []}, {'name': ['name'], 'order_lang': [{'NoLanguage': {'creatorName': ['name'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': [], 'order_lang': [], 'nameIdentifiers': [{'nameIdentifier': '識別'}, {'nameIdentifierURI': 'tets.com'}]}, {'name': [], 'order_lang': []}, {'name': ['別名'], 'order_lang': [{'NoLanguage': {'creatorAlternative': ['別名'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}]}, {'attribute_name': 'Reference', 'attribute_type': 'file', 'content': [{'test': 'content'}, {'file': 'test'}], 'attribute_name_i18n': 'Resource Type'}, {'attribute_name': 'Bibliographic Information', 'attribute_name_i18n': 'Bibliographic Information', 'attribute_type': 'object', 'attribute_value_mlt': [{'title_attribute_name': [], 'magazine_attribute_name': [{'p.': '終了ページ'}], 'length': 1}, {'title_attribute_name': ['タイトル', 'ja : '], 'magazine_attribute_name': [], 'length': 0}, {'title_attribute_name': [], 'magazine_attribute_name': [{'p.': '開始ページ'}], 'length': 1}, {'title_attribute_name': [], 'magazine_attribute_name': [], 'length': 0}, {'title_attribute_name': [], 'magazine_attribute_name': [{'Issue Number': '号'}], 'length': 1}, {'title_attribute_name': [], 'magazine_attribute_name': [{'Number of Page': 'ページ数'}], 'length': 1}]}, {'attribute_name': 'Bibliographic Information', 'attribute_name_i18n': 'Bibliographic Information', 'attribute_type': 'object', 'attribute_value_mlt': [{'title_attribute_name': [], 'magazine_attribute_name': [{'p.': '終了ページ'}], 'length': 1}, {'title_attribute_name': ['タイトル', 'ja : '], 'magazine_attribute_name': [], 'length': 0}, {'title_attribute_name': [], 'magazine_attribute_name': [{'p.': '開始ページ'}], 'length': 1}, {'title_attribute_name': [], 'magazine_attribute_name': [], 'length': 0}, {'title_attribute_name': [], 'magazine_attribute_name': [{'Issue Number': '号'}], 'length': 1}, {'title_attribute_name': [], 'magazine_attribute_name': [{'Number of Page': 'ページ数'}], 'length': 1}]}, {'attribute_name': 'Bibliographic Information', 'attribute_name_i18n': 'Bibliographic Information', 'attribute_type': 'object', 'attribute_value_mlt': [[[]], [[]], [[]]]}, {'attribute_name': 'Information', 'attribute_type': 'object', 'attribute_value': '2022-08-20', 'attribute_name_i18n': 'Information'}, {'attribute_name': 'Information', 'attribute_type': 'nothing', 'attribute_name_i18n': 'Information'}, {'attribute_name': 'thumbnail', 'attribute_name_i18n': 'thumbnail', 'attribute_type': 'object', 'is_thumbnail': True}]
+            assert record.items_show_list == [{'attribute_name': 'PubDate', 'attribute_value': '2022-08-20', 'attribute_name_i18n': 'PubDate'}, {'attribute_name': 'Creator', 'attribute_name_i18n': 'Creator', 'attribute_type': 'creator', 'attribute_value_mlt': [{'name': [], 'type': '', 'order_lang': []}, {'name': ['givenNames'], 'type': '', 'order_lang': [{'NoLanguage': {'givenName': ['givenNames'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': ['mei'], 'type': '', 'order_lang': [{'NoLanguage': {'familyName': ['mei'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': ['mei'], 'type': '', 'order_lang': [{'NoLanguage': {'familyName': ['mei'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': [], 'type': '', 'order_lang': []}, {'name': ['name'], 'type': '', 'order_lang': [{'NoLanguage': {'creatorName': ['name'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}, {'name': [], 'type': '', 'order_lang': [], 'nameIdentifiers': [{'nameIdentifier': '識別'}, {'nameIdentifierURI': 'tets.com'}]}, {'name': [], 'type': '', 'order_lang': []}, {'name': ['別名'], 'type': '', 'order_lang': [{'NoLanguage': {'creatorAlternative': ['別名'], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'ja': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}]}]}, {'attribute_name': 'Reference', 'attribute_type': 'file', 'content': [{'test': 'content'}, {'file': 'test'}], 'attribute_name_i18n': 'Resource Type'}, {'attribute_name': 'Bibliographic Information', 'attribute_name_i18n': 'Bibliographic Information', 'attribute_type': 'object', 'attribute_value_mlt': [{'title_attribute_name': [], 'magazine_attribute_name': [{'p.': '終了ページ'}], 'length': 1}, {'title_attribute_name': ['タイトル', 'ja : '], 'magazine_attribute_name': [], 'length': 0}, {'title_attribute_name': [], 'magazine_attribute_name': [{'p.': '開始ページ'}], 'length': 1}, {'title_attribute_name': [], 'magazine_attribute_name': [], 'length': 0}, {'title_attribute_name': [], 'magazine_attribute_name': [{'Issue Number': '号'}], 'length': 1}, {'title_attribute_name': [], 'magazine_attribute_name': [{'Number of Page': 'ページ数'}], 'length': 1}]}, {'attribute_name': 'Bibliographic Information', 'attribute_name_i18n': 'Bibliographic Information', 'attribute_type': 'object', 'attribute_value_mlt': [{'title_attribute_name': [], 'magazine_attribute_name': [{'p.': '終了ページ'}], 'length': 1}, {'title_attribute_name': ['タイトル', 'ja : '], 'magazine_attribute_name': [], 'length': 0}, {'title_attribute_name': [], 'magazine_attribute_name': [{'p.': '開始ページ'}], 'length': 1}, {'title_attribute_name': [], 'magazine_attribute_name': [], 'length': 0}, {'title_attribute_name': [], 'magazine_attribute_name': [{'Issue Number': '号'}], 'length': 1}, {'title_attribute_name': [], 'magazine_attribute_name': [{'Number of Page': 'ページ数'}], 'length': 1}]}, {'attribute_name': 'Bibliographic Information', 'attribute_name_i18n': 'Bibliographic Information', 'attribute_type': 'object', 'attribute_value_mlt': [[[]], [[]], [[]]]}, {'attribute_name': 'Information', 'attribute_type': 'object', 'attribute_value': '2022-08-20', 'attribute_name_i18n': 'Information'}, {'attribute_name': 'Information', 'attribute_type': 'nothing', 'attribute_name_i18n': 'Information'}, {'attribute_name': 'thumbnail', 'attribute_name_i18n': 'thumbnail', 'attribute_type': 'object', 'is_thumbnail': True}]
 
 
     # .tox/c1/bin/pytest --cov=weko_deposit tests/test_api.py::TestWekoRecord::test_display_file_info -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
     def test_display_file_info(self, app, search_records, search_records_6, search_records_5):
             record = WekoRecord({})
             with app.test_request_context():
-                with pytest.raises(AttributeError):
-                    assert record.display_file_info == ""
+                assert record.display_file_info == []
 
             _, results = search_records
             result = results[0]
@@ -2928,7 +2938,7 @@ class TestWekoRecord:
             from unittest.mock import Mock
             user = Mock()
             user.is_authenticated = True
-            user.id = 1
+            user.id = users[0]["id"]
             user.roles = []
             with patch("flask_login.utils._get_user",return_value=user):
                 file_metadata = [{'url': {'url': 'https://weko3.example.org/record/2/files/hello.txt'}, 'date': [{'dateType': 'Available', 'dateValue': '2022-09-07'}], 'format': 'plain/text', 'filename': 'hello.txt', 'filesize': [{'value': '146 KB'}], 'accessrole': 'open_date', 'version_id': '2dfc9468-6a1f-4204-928d-0795625b79c8', 'mimetype': 'application/pdf', 'file': 'SGVsbG8sIFdvcmxk'}]
@@ -3498,10 +3508,10 @@ class Test_FormatSysCreator:
             with app.test_request_context():
                 obj = _FormatSysCreator(prepare_creator)
                 assert isinstance(obj,_FormatSysCreator)==True
-                # assert obj.format_creator()=={'name': ['Joho, Taro','Joho', 'Taro', 'Alternative Name'], 'order_lang': [{'ja': {'creatorName': ['情報, 太郎'], 'creatorAlternative': ['別名'], 'affiliationName': ['ISNI 所属機関'], 'affiliationNameIdentifier': [{'identifier': 'xxxxxx', 'uri': 'xxxxx'}]}}, {'ja-Kana': {'creatorName': ['ジョウホウ, タロウ'], 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'cn': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [' Affilication Name'], 'affiliationNameIdentifier': [{'identifier': '', 'uri': ''}]}}]}
-                # assert obj.format_creator()=={'name': ['Joho, Taro','Joho', 'Taro', 'Alternative Name'], 'order_lang': [{'ja': {'creatorName': ['情報, 太郎'], 'creatorAlternative': ['別名'], 'affiliationName': ['ISNI 所属機関'], 'affiliationNameIdentifier': [{'identifier': 'xxxxxx', 'uri': 'xxxxx'}]}}, {'ja-Kana': {'creatorName': ['ジョウホウ, タロウ'], 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'en': {'affiliationName': [],'affiliationNameIdentifier': [], 'creatorAlternative': ['Alternative Name'], 'creatorName': ['Joho, Taro']}},{'cn': {'affiliationName': [' Affilication Name'],'affiliationNameIdentifier': [{'identifier': '','uri': ''}],'creatorAlternative': [],'creatorName': None}}]}
-                assert obj.format_creator()=={'name': ['Joho, Taro','Joho', 'Taro', 'Alternative Name'], 'order_lang': [{'ja': {'creatorName': ['情報, 太郎'], 'creatorAlternative': ['別名'], 'affiliationName': ['ISNI 所属機関'], 'affiliationNameIdentifier': [{'identifier': 'xxxxxx', 'uri': 'xxxxx'}]}}, {'ja-Kana': {'creatorName': ['ジョウホウ, タロウ'], 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'en': {'affiliationName': [],'affiliationNameIdentifier': [], 'creatorAlternative': ['Alternative Name'], 'creatorName': ['Joho, Taro']}},{'cn': {'affiliationName': [' Affilication Name'],'affiliationNameIdentifier': [{'identifier': '','uri': ''}],'creatorAlternative': [],'creatorName': None}}]}
-                assert obj.format_creator()=={'name': ['Joho, Taro','Joho', 'Taro', 'Alternative Name'], 'order_lang': [{'ja': {'creatorName': ['情報, 太郎'], 'creatorAlternative': ['別名'], 'affiliationName': ['ISNI 所属機関'], 'affiliationNameIdentifier': [{'identifier': 'xxxxxx', 'uri': 'xxxxx'}]}}, {'ja-Kana': {'creatorName': ['ジョウホウ, タロウ'], 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'en': {'affiliationName': [],'affiliationNameIdentifier': [], 'creatorAlternative': ['Alternative Name'], 'creatorName': ['Joho, Taro']}},{'cn': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [' Affilication Name'], 'affiliationNameIdentifier': [{'identifier': '', 'uri': ''}]}}]}
+                # assert obj.format_creator()=={'name': ['Joho, Taro'], 'order_lang': [{'ja': {'creatorName': ['情報, 太郎'], 'creatorAlternative': ['別名'], 'affiliationName': ['ISNI 所属機関'], 'affiliationNameIdentifier': [{'identifier': 'xxxxxx', 'uri': 'xxxxx'}]}}, {'ja-Kana': {'creatorName': ['ジョウホウ, タロウ'], 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'cn': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [' Affilication Name'], 'affiliationNameIdentifier': [{'identifier': '', 'uri': ''}]}}]}
+                # assert obj.format_creator()=={'name': ['Joho, Taro'], 'order_lang': [{'ja': {'creatorName': ['情報, 太郎'], 'creatorAlternative': ['別名'], 'affiliationName': ['ISNI 所属機関'], 'affiliationNameIdentifier': [{'identifier': 'xxxxxx', 'uri': 'xxxxx'}]}}, {'ja-Kana': {'creatorName': ['ジョウホウ, タロウ'], 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'en': {'affiliationName': [],'affiliationNameIdentifier': [], 'creatorAlternative': ['Alternative Name'], 'creatorName': ['Joho, Taro']}},{'cn': {'affiliationName': [' Affilication Name'],'affiliationNameIdentifier': [{'identifier': '','uri': ''}],'creatorAlternative': [],'creatorName': None}}]}
+                assert obj.format_creator()=={'name': ['Joho, Taro'], 'type': '', 'order_lang': [{'ja': {'creatorName': ['情報, 太郎'], 'creatorAlternative': ['別名'], 'affiliationName': ['ISNI 所属機関'], 'affiliationNameIdentifier': [{'identifier': 'xxxxxx', 'uri': 'xxxxx'}]}}, {'ja-Kana': {'creatorName': ['ジョウホウ, タロウ'], 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'en': {'affiliationName': [],'affiliationNameIdentifier': [], 'creatorAlternative': ['Alternative Name'], 'creatorName': ['Joho, Taro']}},{'cn': {'affiliationName': [' Affilication Name'],'affiliationNameIdentifier': [{'identifier': '','uri': ''}],'creatorAlternative': [],'creatorName': None}}]}
+                assert obj.format_creator()=={'name': ['Joho, Taro'], 'type': '', 'order_lang': [{'ja': {'creatorName': ['情報, 太郎'], 'creatorAlternative': ['別名'], 'affiliationName': ['ISNI 所属機関'], 'affiliationNameIdentifier': [{'identifier': 'xxxxxx', 'uri': 'xxxxx'}]}}, {'ja-Kana': {'creatorName': ['ジョウホウ, タロウ'], 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'en': {'affiliationName': [],'affiliationNameIdentifier': [], 'creatorAlternative': ['Alternative Name'], 'creatorName': ['Joho, Taro']}},{'cn': {'creatorName': None, 'creatorAlternative': [], 'affiliationName': [' Affilication Name'], 'affiliationNameIdentifier': [{'identifier': '', 'uri': ''}]}}]}
 
                 # with app.test_request_context(headers=[("Accept-Language", "en")]):
                 #     prepare_creator_1={'givenNames': [{'givenName': '太郎', 'givenNameLang': 'ja'}],'givenNames': [{'givenName': '太郎', 'givenNameLang': 'ja'}], 'givenNames': [{'givenName': '太郎', 'givenNameLang': 'ja'}]}
@@ -3532,7 +3542,7 @@ class Test_FormatSysCreator:
                     elif item.get("en"):
                         assert "creatorType" not in list(item.get("en").keys())
 
-            assert returnData == {'name': ['Joho, Taro'], 'type': 'creator_type_test', 'order_lang': [{'ja': {'creatorName': ['情報, 太郎'], 'creatorAlternative': ['別名'], 'affiliationName': ['ISNI 所属機関'], 'affiliationNameIdentifier': [{'identifier': 'xxxxxx', 'uri': 'xxxxx'}]}}, {'ja-Kana': {'creatorName': ['ジョウホウ, タロウ'], 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'en': {'creatorName': ['Joho, Taro'], 'creatorAlternative': ['Alternative Name'], 'affiliationName': [' Affilication Name'], 'affiliationNameIdentifier': [{'identifier': '', 'uri': ''}]}}]}
+            assert returnData == {'name': ['Joho, Taro'], 'type': 'creator_type_test', 'order_lang': [{'ja': {'creatorName': ['情報, 太郎'], 'creatorAlternative': ['別名'], 'affiliationName': ['ISNI 所属機関'], 'affiliationNameIdentifier': [{'identifier': 'xxxxxx', 'uri': 'xxxxx'}]}}, {'ja-Kana': {'creatorName': ['ジョウホウ, タロウ'], 'creatorAlternative': [], 'affiliationName': [], 'affiliationNameIdentifier': []}}, {'en': {'affiliationName': [], 'affiliationNameIdentifier': [], 'creatorAlternative': ['Alternative Name'], 'creatorName': ['Joho, Taro']}}, {'cn': {'affiliationName': [' Affilication Name'], 'affiliationNameIdentifier': [{'identifier': '', 'uri': ''}], 'creatorAlternative': [], 'creatorName': None}}]}
 
     # 54105-23,24
     # .tox/c1/bin/pytest --cov=weko_deposit tests/test_api.py::Test_FormatSysCreator::test_format_creator_not_dict_or_list -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
@@ -3832,7 +3842,7 @@ class Test_FormatSysCreator:
                 creator_name = []
                 obj.languages=["ja","en"]
                 obj._get_default_creator_name(list_parent_key,creator_name)
-                assert creator_name==['Joho, Taro', 'Joho', 'Taro', 'Alternative Name']
+                assert creator_name==['Joho, Taro']
 
                 obj = _FormatSysCreator(prepare_creator)
                 assert isinstance(obj, _FormatSysCreator) == True
@@ -4150,11 +4160,9 @@ def test_weko_record(app, client, db, users, location):
     # record.navi
 
     # record.item_type_info
-    with pytest.raises(AttributeError):
-        record.items_show_list
+    assert record.items_show_list == []
 
-    with pytest.raises(AttributeError):
-        record.display_file_info
+    assert record.display_file_info == []
 
     with app.test_request_context(headers=[("Accept-Language", "en")]):
         record._get_creator([{}], True)

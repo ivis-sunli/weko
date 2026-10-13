@@ -25,7 +25,7 @@ import pytest
 import types
 import uuid
 
-from io import StringIO
+from io import BytesIO, StringIO
 from invenio_pidstore.errors import PIDDoesNotExistError
 from invenio_pidstore.models import PersistentIdentifier
 from invenio_search.engine import search
@@ -102,10 +102,10 @@ class MockRecordIndexer:
     def process_bulk_queue(self, search_bulk_kwargs):
         pass
 # .tox/c1/bin/pytest --cov=weko_deposit tests/test_tasks.py::test_update_authorInfo -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
-def test_update_authorInfo(app, db, location, records):
+def test_update_authorInfo(app, db, location, records, mocker):
 # def test_update_authorInfo(app, db, records, authors):
     app.config.update(WEKO_SEARCH_MAX_RESULT=1)
-    patch("weko_deposit.tasks.WekoDeposit.update_author_link")
+    mock_update_author_link = mocker.patch("weko_deposit.tasks.WekoDeposit.update_author_link")
     mock_recordssearch = MagicMock(side_effect=MockRecordsSearch)
     with patch("weko_deposit.tasks.RecordsSearch", mock_recordssearch):
         with patch("weko_deposit.tasks.RecordIndexer", MockRecordIndexer):
@@ -255,9 +255,9 @@ def test_update_authorInfo(app, db, location, records):
             ex = SQLAlchemyError("test_error")
             with patch("weko_deposit.tasks.db.session.commit", side_effect=ex):
                 with patch("weko_deposit.tasks.update_items_by_authorInfo.retry") as mock_retry:
-                    with patch("weko_deposit.tasks.weko_logger") as mock_logger:
+                    with patch.object(app.logger, "exception") as mock_logger:
                         update_items_by_authorInfo(["1","xxx"], _target)
-                        mock_logger.assert_any_call(key='WEKO_COMMON_DB_SOME_ERROR', ex=ex)
+                        mock_logger.assert_any_call('Failed to update items by author data. err:{}'.format(ex))
 
     # Exception
     mock_recordssearch = MagicMock(side_effect=MockRecordsSearch)
@@ -478,7 +478,7 @@ class TestProcess:
     @patch('weko_deposit.tasks.RecordsSearch')
     @patch('weko_deposit.tasks._update_author_data')
     @patch('weko_deposit.tasks.db.session.commit')
-    def test_process_first_retry_error(self, mock_commit, mock_update_author_data, mock_records_search, app):
+    def test_process_first_retry_error(self, mock_commit, mock_update_author_data, mock_records_search, app, mocker):
         # 条件
         data_size = 10
         data_from = 0
@@ -497,11 +497,19 @@ class TestProcess:
                 'total': 1
             }
         }
-        mock_update_author_data.return_value = ('uuid', ['uuid'], set(), {})
+        record_uuid = uuid.uuid4()
+        mock_update_author_data.return_value = (record_uuid, [record_uuid], set())
+        query = mocker.patch('weko_deposit.tasks.PersistentIdentifier.query')
+        query.filter.return_value.values.return_value = [(record_uuid,)]
+        indexer = mocker.patch('weko_deposit.tasks.RecordIndexer').return_value
+        indexer.bulk_index.side_effect = RuntimeError("bulk update failed")
+        retry_sleep = mocker.patch('weko_deposit.tasks.sleep')
 
         # 実行と期待結果
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError, match="bulk update failed"):
             _process(data_size, data_from, process_counter, target, origin_pkid_list, key_map, author_prefix, affiliation_id, force_change)
+        assert indexer.bulk_index.call_count == 2
+        retry_sleep.assert_called_once_with(2)
 
 # .tox/c1/bin/pytest --cov=weko_deposit tests/test_tasks.py::TestProcess::test_process_second_retry_error -v -s -vv --cov-branch --cov-report=html --cov-config=tox.ini --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
     @patch('weko_deposit.tasks.RecordsSearch')
@@ -529,11 +537,16 @@ class TestProcess:
             }
         }
         uuid1 = uuid.uuid4()
-        mock_update_author_data.return_value = (uuid1, [uuid1], set(), {})
+        mock_update_author_data.return_value = (uuid1, [uuid1], set())
+        deposit = mocker.patch('weko_deposit.tasks.WekoDeposit.get_record').return_value
+        deposit.update_author_link.side_effect = RuntimeError("author link update failed")
+        retry_sleep = mocker.patch('weko_deposit.tasks.sleep')
 
         # 実行と期待結果
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError, match="author link update failed"):
             _process(data_size, data_from, process_counter, target, origin_pkid_list, key_map, author_prefix, affiliation_id, force_change)
+        assert deposit.update_author_link.call_count == 2
+        retry_sleep.assert_called_once_with(2)
 
 # .tox/c1/bin/pytest --cov=weko_deposit tests/test_tasks.py::TestChangeToMeta -v -s -vv --cov-branch --cov-report=html --cov-config=tox.ini --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
 class TestChangeToMeta:
@@ -570,7 +583,7 @@ class TestChangeToMeta:
         }
 
         # 実行と検証
-        target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, key_map, force_change)
+        target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, key_map, [], force_change=force_change)
         assert target_id == expected_target_id
         assert meta == expected_meta
 
@@ -670,7 +683,7 @@ class TestChangeToMeta:
         }
 
         # 実行と検証
-        target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, key_map, force_change)
+        target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, key_map, [], force_change=force_change)
         assert target_id == expected_target_id
         assert meta == expected_meta
 
@@ -746,7 +759,7 @@ class TestChangeToMeta:
                     [{'affiliationName': 'Test Affiliation', 'affiliationNameLang': 'en'}]}]}
 
         # 実行と検証
-        target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, key_map, force_change)
+        target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, key_map, [], force_change=force_change)
         assert target_id == expected_target_id
         assert meta == expected_meta
 
@@ -813,7 +826,7 @@ class TestChangeToMeta:
         expected_target_id = None
         expected_meta = {'mails': [{'mail': 'test@example.com'}], 'affiliations': [{'nameIdentifiers': [], 'affiliationNames': []}]}
         # 実行と検証
-        target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, key_map, force_change)
+        target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, key_map, [], force_change=force_change)
         assert target_id == expected_target_id
         assert meta == expected_meta
 
@@ -832,7 +845,7 @@ class TestChangeToMeta:
         expected_meta = {}
 
         # 実行と検証
-        target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, key_map, force_change)
+        target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, key_map, [], force_change=force_change)
         assert target_id == expected_target_id
         assert meta == expected_meta
 
@@ -852,7 +865,7 @@ class TestChangeToMeta:
         expected_meta = {}
 
         # 実行と検証
-        target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, key_map, force_change)
+        target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, key_map, [], force_change=force_change)
         assert target_id == expected_target_id
         assert meta == expected_meta
 
@@ -1299,35 +1312,35 @@ class TestChangeToMeta_Extended:
     # 54702-9,10
     # .tox/c1/bin/pytest --cov=weko_deposit tests/test_tasks.py::TestChangeToMeta_Extended::test_change_to_meta_exists_authorNameInfo -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
     def test_change_to_meta_exists_authorNameInfo(self, app, db, records, mocker, prepare_key_map):
-        target = {"authorNameInfo": [{"nameShowFlg": True, "familyName": "山田", "firstName": "太郎", "language": "ja"}, {"nameShowFlg": False, "familyName": "Yamada", "firstName": "Taro", "language": "en"}]}
+        target = {"authorNameInfo": [{"nameShowFlg": "true", "familyName": "山田", "firstName": "太郎", "language": "ja"}, {"nameShowFlg": "false", "familyName": "Yamada", "firstName": "Taro", "language": "en"}]}
         author_prefix = {}
         affiliation_id = {}
         item_names_data = {}
         for key in prepare_key_map:
             if key == "creator":
-                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["creator"], item_names_data)
+                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["creator"], item_names_data, force_change=True)
                 assert meta == {"creatorNames": [{"creatorName": "山田, 太郎", "creatorNameLang": "ja"}], "familyNames": [{"familyName": "山田", "familyNameLang": "ja"}], "givenNames": [{"givenName": "太郎", "givenNameLang": "ja"}]}
             elif key == "contributor":
-                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["contributor"], item_names_data)
+                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["contributor"], item_names_data, force_change=True)
                 assert meta == {"contributorNames": [{"contributorName": "山田, 太郎", "lang": "ja"}], "familyNames": [{"familyName": "山田", "familyNameLang": "ja"}], "givenNames": [{"givenName": "太郎", "givenNameLang": "ja"}]}
             elif key == "full_name":
-                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["full_name"], item_names_data)
+                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["full_name"], item_names_data, force_change=True)
                 assert meta == {"names": [{"name": "山田, 太郎", "nameLang": "ja"}], "familyNames": [{"familyName": "山田", "familyNameLang": "ja"}], "givenNames": [{"givenName": "太郎", "givenNameLang": "ja"}]}
 
-        target = {"authorNameInfo": [{"nameShowFlg": True, "familyName": "山田", "firstName": "太郎", "language": "ja"}, {"nameShowFlg": True, "familyName": "Yamada", "firstName" :"Taro", "language": "en"}]}
+        target = {"authorNameInfo": [{"nameShowFlg": "true", "familyName": "山田", "firstName": "太郎", "language": "ja"}, {"nameShowFlg": "true", "familyName": "Yamada", "firstName" :"Taro", "language": "en"}]}
 
         for key in prepare_key_map:
             if key == "creator":
                 item_names_data = [{"creatorName": "テスト, 太郎", "creatorNameLang": "ja", "creatorNameType": "Personal"}]
-                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["creator"], item_names_data)
+                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["creator"], item_names_data, force_change=True)
                 assert meta == {"creatorNames":[{"creatorName": "山田, 太郎", "creatorNameLang": "ja", "creatorNameType": "Personal"}, {"creatorName": "Yamada, Taro", "creatorNameLang": "en"}], "familyNames": [{"familyName": "山田", "familyNameLang": "ja"}, {"familyName": "Yamada", "familyNameLang": "en"}], "givenNames": [{"givenName": "太郎", "givenNameLang": "ja"}, {"givenName": "Taro", "givenNameLang": "en"}]}
             elif key == "contributor":
                 item_names_data = [{"contributorName": "テスト, 太郎", "lang": "ja", "nameType": "Personal"}]
-                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["contributor"], item_names_data)
+                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["contributor"], item_names_data, force_change=True)
                 assert meta == {"contributorNames":[{"contributorName": "山田, 太郎", "lang": "ja", "nameType": "Personal"}, {"contributorName": "Yamada, Taro", "lang": "en"}], "familyNames": [{"familyName": "山田", "familyNameLang": "ja"}, {"familyName": "Yamada", "familyNameLang": "en"}], "givenNames": [{"givenName": "太郎", "givenNameLang": "ja"}, {"givenName": "Taro", "givenNameLang": "en"}]}
             elif key == "full_name":
                 item_names_data = [{"name": "テスト, 太郎", "nameLang": "ja"}]
-                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["full_name"], item_names_data)
+                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["full_name"], item_names_data, force_change=True)
                 assert meta == {"names":[{"name": "山田, 太郎", "nameLang": "ja"}, {"name": "Yamada, Taro", "nameLang": "en"}], "familyNames": [{"familyName": "山田", "familyNameLang": "ja"}, {"familyName": "Yamada", "familyNameLang": "en"}], "givenNames": [{"givenName": "太郎", "givenNameLang": "ja"}, {"givenName": "Taro", "givenNameLang": "en"}]}
 
     # 54702-11
@@ -1346,7 +1359,7 @@ class TestChangeToMeta_Extended:
     # 54702-12
     # .tox/c1/bin/pytest --cov=weko_deposit tests/test_tasks.py::TestChangeToMeta_Extended::test_change_to_meta_exists_authorIdInfo -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
     def test_change_to_meta_exists_authorIdInfo(self, app, db, records, mocker, prepare_key_map):
-        target = {"authorIdInfo": [{"authorIdShowFlg": True, "idType": "-1"}, {"authorIdShowFlg": True, "idType": "1", "authorId": "1"}, {"authorIdShowFlg": True, "idType": "2", "authorId": "0000-0001-0002-0003"}, {"authorIdShowFlg": True, "idType": "3", "authorId": "0000-0001-0002-0003"}, {"authorIdShowFlg": False, "idType": "-1"}]}
+        target = {"authorIdInfo": [{"authorIdShowFlg": "true", "idType": "-1"}, {"authorIdShowFlg": "true", "idType": "1", "authorId": "1"}, {"authorIdShowFlg": "true", "idType": "2", "authorId": "0000-0001-0002-0003"}, {"authorIdShowFlg": "true", "idType": "3", "authorId": "0000-0001-0002-0003"}, {"authorIdShowFlg": "false", "idType": "-1"}]}
         author_prefix = {"1": {"scheme": "WEKO", "url": ""}, "2": {"scheme": "ORCID", "url": "https://orcid.org/##"}, "3": {"scheme": "ISNI", "url": "http://isni.org/isni/"}}
         affiliation_id = {}
         item_names_data = {}
@@ -1364,31 +1377,31 @@ class TestChangeToMeta_Extended:
         item_names_data = {}
         for key in prepare_key_map:
             if key == "creator":
-                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["creator"], item_names_data)
+                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["creator"], item_names_data, force_change=True)
                 assert meta == {"creatorMails": [{"creatorMail": "test@nii.co.jp"}]}
             elif key == "contributor":
-                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["contributor"], item_names_data)
+                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["contributor"], item_names_data, force_change=True)
                 assert meta == {"contributorMails": [{"contributorMail": "test@nii.co.jp"}]}
             elif key == "full_name":
-                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["full_name"], item_names_data)
+                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["full_name"], item_names_data, force_change=True)
                 assert meta == {"mails": [{"mail": "test@nii.co.jp"}]}
 
     # 54702-14
     # .tox/c1/bin/pytest --cov=weko_deposit tests/test_tasks.py::TestChangeToMeta_Extended::test_change_to_meta_exists_affiliationInfo -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
     def test_change_to_meta_exists_affiliationInfo(self, app, db, records, mocker, prepare_key_map):
-        target = {"affiliationInfo": [{"identifierInfo": [{"identifierShowFlg": False}, {"identifierShowFlg": True, "affiliationIdType": "-1"}, {"identifierShowFlg": True, "affiliationIdType": "1", "affiliationId": "057zh3y96"}, {"identifierShowFlg": True, "affiliationIdType": "2", "affiliationId": "000000012192178X"}, {"identifierShowFlg": True, "affiliationIdType": "3", "affiliationId": "0000000121691048"}], "affiliationNameInfo": [{"affiliationNameShowFlg": False}, {"affiliationNameShowFlg": True, "affiliationName": "The University of Tokyo", "affiliationNameLang": "en"}]}]}
+        target = {"affiliationInfo": [{"identifierInfo": [{"identifierShowFlg": "false"}, {"identifierShowFlg": "true", "affiliationIdType": "-1"}, {"identifierShowFlg": "true", "affiliationIdType": "1", "affiliationId": "057zh3y96"}, {"identifierShowFlg": "true", "affiliationIdType": "2", "affiliationId": "000000012192178X"}, {"identifierShowFlg": "true", "affiliationIdType": "3", "affiliationId": "0000000121691048"}], "affiliationNameInfo": [{"affiliationNameShowFlg": "false"}, {"affiliationNameShowFlg": "true", "affiliationName": "The University of Tokyo", "affiliationNameLang": "en"}]}]}
         author_prefix = {}
         affiliation_id = {"1": {"scheme": "ROR", "url": "https://ror.org/##"}, "2": {"scheme": "ISNI", "url": "http://isni.org/isni/"}, "3": {"scheme": "kakenhi", "url": ""}}
         item_names_data = {}
         for key in prepare_key_map:
             if key == "creator":
-                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["creator"], item_names_data)
+                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["creator"], item_names_data, force_change=True)
                 assert meta == {"creatorAffiliations": [{"affiliationNameIdentifiers": [{"affiliationNameIdentifierScheme": "ROR", "affiliationNameIdentifier": "057zh3y96", "affiliationNameIdentifierURI": "https://ror.org/057zh3y96"}, {"affiliationNameIdentifierScheme": "ISNI", "affiliationNameIdentifier": "000000012192178X", "affiliationNameIdentifierURI": "http://isni.org/isni/"}, {"affiliationNameIdentifierScheme": "kakenhi", "affiliationNameIdentifier": "0000000121691048"}], "affiliationNames": [{"affiliationName": "The University of Tokyo", "affiliationNameLang": "en"}]}]}
             elif key == "contributor":
-                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["contributor"], item_names_data)
+                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["contributor"], item_names_data, force_change=True)
                 assert meta == {"contributorAffiliations": [{"contributorAffiliationNameIdentifiers": [{"contributorAffiliationScheme": "ROR", "contributorAffiliationNameIdentifier": "057zh3y96", "contributorAffiliationURI": "https://ror.org/057zh3y96"}, {"contributorAffiliationScheme": "ISNI", "contributorAffiliationNameIdentifier": "000000012192178X", "contributorAffiliationURI": "http://isni.org/isni/"}, {"contributorAffiliationScheme": "kakenhi", "contributorAffiliationNameIdentifier": "0000000121691048"}], "contributorAffiliationNames": [{"contributorAffiliationName": "The University of Tokyo", "contributorAffiliationNameLang": "en"}]}]}
             elif key == "full_name":
-                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["full_name"], item_names_data)
+                target_id, meta = _change_to_meta(target, author_prefix, affiliation_id, prepare_key_map["full_name"], item_names_data, force_change=True)
                 assert meta == {"affiliations": [{"nameIdentifiers": [{"nameIdentifierScheme": "ROR", "nameIdentifier": "057zh3y96", "nameIdentifierURI": "https://ror.org/057zh3y96"}, {"nameIdentifierScheme": "ISNI", "nameIdentifier": "000000012192178X", "nameIdentifierURI": "http://isni.org/isni/"}, {"nameIdentifierScheme": "kakenhi", "nameIdentifier": "0000000121691048"}], "affiliationNames": [{"affiliationName": "The University of Tokyo", "lang": "en"}]}]}
 
 # .tox/c1/bin/pytest --cov=weko_deposit tests/test_tasks.py::TestUpdateAuthorData_Extended -v -s -vv --cov-branch --cov-report=html --cov-config=tox.ini --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
@@ -1692,7 +1705,7 @@ class TestUpdateAuthorData_Extended:
         # 実行
         result = _update_author_data(item_id, record_ids, process_counter, target, origin_pkid_list, key_map, author_prefix, affiliation_id, force_change)
         # 期待結果
-        assert result == (None, set())
+        assert result == (None, set(), {})
         assert process_counter["fail_items"] == [{"record_id": "1", "author_ids": [], "message": "PID 1 does not exist."}]
 
     # 54702-30
@@ -1720,7 +1733,9 @@ class TestUpdateAuthorData_Extended:
         assert process_counter["fail_items"] == [{"record_id": "1", "author_ids": [], "message": "Test Exception"}]
 
 # .tox/c1/bin/pytest --cov=weko_deposit tests/test_tasks.py::test_extract_pdf_and_update_file_contents -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/weko-deposit/.tox/c1/tmp
-def test_extract_pdf_and_update_file_contents(app, db, location, caplog):
+def test_extract_pdf_and_update_file_contents(app, db, location, caplog, mocker):
+    retry_sleep = MagicMock()
+    mocker.patch("weko_deposit.tasks.time", types.SimpleNamespace(sleep=retry_sleep))
     indexer = WekoIndexer()
     indexer.get_search_index()
 
@@ -1763,6 +1778,7 @@ def test_extract_pdf_and_update_file_contents(app, db, location, caplog):
             assert mock_pdf.call_count == num_pdf
             assert mock_tika.call_count == num_not_pdf
             mock_update.assert_called_with(rec_uuid,test_file_data)
+            retry_sleep.assert_not_called()
 
             # Check if temporary files have been deleted
             for call in mock_pdf.call_args_list:
@@ -1776,11 +1792,11 @@ def test_extract_pdf_and_update_file_contents(app, db, location, caplog):
                 assert os.path.exists(filepath) == False
 
 
-            from fs.errors import ResourceNotFoundError
+            from fs.errors import ResourceNotFound
             # error in extract_text_from_pdf
             # Check if temporary files have been deleted
             with patch("weko_deposit.utils.extract_text_from_pdf", side_effect=FileNotFoundError("test exception")) as mock_pdf,\
-                    patch("weko_deposit.utils.extract_text_with_tika", side_effect=ResourceNotFoundError("test_exception")) as mock_tika:
+                    patch("weko_deposit.utils.extract_text_with_tika", side_effect=ResourceNotFound("test_exception")) as mock_tika:
                 extract_pdf_and_update_file_contents(test_data, deposit.id)
                 assert mock_pdf.call_count == num_pdf
                 assert "test exception" in caplog.text
@@ -1800,12 +1816,16 @@ def test_extract_pdf_and_update_file_contents(app, db, location, caplog):
         with patch("weko_deposit.tasks.update_file_content", side_effect=search.ConflictError()) as mock_update:
             extract_pdf_and_update_file_contents(test_data, deposit.id)
             assert mock_update.call_count == 3 # retry 3 times
+            assert retry_sleep.call_args_list == [mock.call(1)] * 3
+            retry_sleep.reset_mock()
             assert f"Failed to update file content after 3 attempts. record_uuid: {rec_uuid}" in caplog.text
             caplog.clear()
         # raise ConflictError in update_file_content
         with patch("weko_deposit.tasks.update_file_content", side_effect=search.NotFoundError()) as mock_update:
             extract_pdf_and_update_file_contents(test_data, deposit.id)
             assert mock_update.call_count == 3 # retry 3 times
+            assert retry_sleep.call_args_list == [mock.call(1)] * 3
+            retry_sleep.reset_mock()
             assert f"Failed to update file content after 3 attempts. record_uuid: {rec_uuid}" in caplog.text
             caplog.clear()
 
@@ -1822,6 +1842,8 @@ def test_extract_pdf_and_update_file_contents(app, db, location, caplog):
     ("/tmp/tika.jar", True, None, 0, "other", "update_error", None),  # other exception
 ])
 def test_extract_pdf_and_update_file_contents_cases(monkeypatch, tika_path, isfile, storage_exception, subprocess_returncode, update_side_effect, expect_error_attr, expect_content):
+    retry_sleep = MagicMock()
+    monkeypatch.setattr('weko_deposit.tasks.time', types.SimpleNamespace(sleep=retry_sleep))
     if tika_path is not None:
         monkeypatch.setenv("TIKA_JAR_FILE_PATH", tika_path)
     else:
@@ -1829,14 +1851,10 @@ def test_extract_pdf_and_update_file_contents_cases(monkeypatch, tika_path, isfi
     monkeypatch.setattr(os.path, "isfile", lambda path: isfile)
     class DummyStorage:
         def open(self, mode):
-            class DummyFP:
-                def read(self, size): return b'data'
-                def __enter__(self): return self
-                def __exit__(self, exc_type, exc_val, exc_tb): pass
-            return DummyFP()
+            return BytesIO(b'data')
     if storage_exception == 'ResourceNotFoundError':
         import weko_deposit.tasks as tasks_mod
-        monkeypatch.setattr("weko_deposit.tasks.current_files_rest", types.SimpleNamespace(storage_factory=lambda fileurl, size: (_ for _ in ()).throw(tasks_mod.ResourceNotFoundError("not found"))))
+        monkeypatch.setattr("weko_deposit.tasks.current_files_rest", types.SimpleNamespace(storage_factory=lambda fileurl, size: (_ for _ in ()).throw(tasks_mod.ResourceNotFound("not found"))))
     elif storage_exception:
         monkeypatch.setattr("weko_deposit.tasks.current_files_rest", types.SimpleNamespace(storage_factory=lambda fileurl, size: (_ for _ in ()).throw(storage_exception)))
     else:
@@ -1844,15 +1862,13 @@ def test_extract_pdf_and_update_file_contents_cases(monkeypatch, tika_path, isfi
     dummy_logger = types.SimpleNamespace(error=lambda x: setattr(monkeypatch, expect_error_attr, x) if expect_error_attr and expect_error_attr is not Exception else None)
     dummy_app = types.SimpleNamespace(config={'WEKO_DEPOSIT_FILESIZE_LIMIT': 100}, logger=dummy_logger)
     monkeypatch.setattr("weko_deposit.tasks.current_app", dummy_app)
-    monkeypatch.setattr("weko_deposit.tasks.subprocess", types.SimpleNamespace(
-        run=lambda *a, **k: types.SimpleNamespace(returncode=subprocess_returncode, stdout=b'abc\n', stderr=b''),
-        PIPE=object()
-    ))
+    monkeypatch.setattr("weko_deposit.utils.subprocess.run",
+        lambda *a, **k: types.SimpleNamespace(returncode=subprocess_returncode, stdout=b'abc\n', stderr=b''))
     import weko_deposit.tasks as tasks_mod
     if update_side_effect == 'conflict':
-        monkeypatch.setattr("weko_deposit.tasks.update_file_content", lambda *a, **k: (_ for _ in ()).throw(tasks_mod.ConflictError()))
+        monkeypatch.setattr("weko_deposit.tasks.update_file_content", lambda *a, **k: (_ for _ in ()).throw(tasks_mod.search.ConflictError(409, "conflict", {})))
     elif update_side_effect == 'notfound':
-        monkeypatch.setattr("weko_deposit.tasks.update_file_content", lambda *a, **k: (_ for _ in ()).throw(tasks_mod.NotFoundError()))
+        monkeypatch.setattr("weko_deposit.tasks.update_file_content", lambda *a, **k: (_ for _ in ()).throw(tasks_mod.search.NotFoundError(404, "notfound", {})))
     elif update_side_effect == 'other':
         monkeypatch.setattr("weko_deposit.tasks.update_file_content", lambda *a, **k: (_ for _ in ()).throw(Exception("other")))
     else:
@@ -1866,6 +1882,10 @@ def test_extract_pdf_and_update_file_contents_cases(monkeypatch, tika_path, isfi
             extract_pdf_and_update_file_contents(file_dict, 'rid')
     else:
         extract_pdf_and_update_file_contents(file_dict, 'rid')
+        if update_side_effect is None:
+            retry_sleep.assert_not_called()
+        else:
+            assert retry_sleep.call_args_list == [mock.call(1)] * 3
         if expect_content:
             assert called['called'][0] == 'rid'
             assert called['called'][1]['f.pdf'] == expect_content
@@ -2008,14 +2028,14 @@ def test_update_db_search_data(app, db,search_index, search_records,authors):
 
     # OpenSearchException by indexer.client.update()
     ex = search.OpenSearchException("test_search_error")
-    with patch("search.update", side_effect=ex):
+    with patch("invenio_search.engine.search.OpenSearch.update", side_effect=ex):
         with patch("weko_deposit.tasks.weko_logger") as mock_logger:
             update_db_search_data(origin_pkid_list, origin_id_list)
             mock_logger.assert_any_call(key='WEKO_COMMON_ERROR_SEARCH', ex=ex)
 
     # Exception by indexer.client.update()
     ex = Exception("test_exception")
-    with patch("search.update", side_effect=ex):
+    with patch("invenio_search.engine.search.OpenSearch.update", side_effect=ex):
         with patch("weko_deposit.tasks.weko_logger") as mock_logger:
             update_db_search_data(origin_pkid_list, origin_id_list)
             mock_logger.assert_any_call(key='WEKO_COMMON_ERROR_UNEXPECTED', ex=ex)

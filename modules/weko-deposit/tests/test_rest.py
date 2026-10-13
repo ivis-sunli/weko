@@ -259,7 +259,7 @@ def test_depid_item_put_acl_users(client, users, deposit, index, status_code):
 # .tox/c1/bin/pytest --cov=weko_deposit tests/test_rest.py::test_put_upgrade_record_is_not_none_and_dot_0_in_pid_value -vv -s --cov-branch --cov-report=html --cov-report=term --basetemp=/code/modules/weko-deposit/.tox/c1/tmp --full-trace
 def test_put_upgrade_record_is_not_none_and_dot_0_in_pid_value(client, search_records, users, deposit, db,location ,db_itemtype,db_actions):
     login_user_via_session(client=client, email=users[2]['email'])
-    pid_value_with_0 = "{}.0".format(deposit)
+    pid_value_with_0 = "{}.0".format(search_records[1][0]["recid"].pid_value)
     kwargs = {
         'pid_value': pid_value_with_0
     }
@@ -538,17 +538,17 @@ def test_depid_item_post_guest(client, deposit):
         res = client.post(url,
                         data=json.dumps(input),
                         content_type='application/json')
-        assert res.status_code == 200
+        assert res.status_code == 201
         data = json.loads(res.data)
         data.pop('created')
         data['links'].pop('bucket')
         assert data == {
-            'id': 1,
+            'id': str(deposit),
             'links': {
-                'iframe_tree': '/items/iframe/index/1',
-                'iframe_tree_upgrade': '/items/iframe/index/1.1',
-                'index': '/api/deposits/redirect/1',
-                'r': '/items/index/1'
+                'iframe_tree': '/items/iframe/index/{}'.format(deposit),
+                'iframe_tree_upgrade': '/items/iframe/index/{}.1'.format(deposit),
+                'index': '/api/deposits/redirect/{}'.format(deposit),
+                'r': '/items/index/{}'.format(deposit)
             }
         }
 
