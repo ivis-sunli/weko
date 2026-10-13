@@ -50,16 +50,18 @@ def test_set_expand_login(client_api, users, id, status_code):
                         content_type="application/json")
     assert res.status_code == status_code
 
-    with patch("weko_index_tree.views.session", return_value={'index_tree_expand_state': ['1']}):
+    with patch("weko_index_tree.views.session", {'index_tree_expand_state': ['1']}) as session_data:
         res = client_api.post("/api/indextree/set_expand",
                             data=json.dumps({'index_id': '1'}),
                             content_type="application/json")
         assert res.status_code == status_code
+        assert session_data['index_tree_expand_state'] == []
 
         res = client_api.post("/api/indextree/set_expand",
                             data=json.dumps({'index_id': '2'}),
                             content_type="application/json")
         assert res.status_code == status_code
+        assert session_data['index_tree_expand_state'] == ['2']
 
 
 # .tox/c1/bin/pytest --cov=weko_index_tree tests/test_views.py::test_set_expand_guest -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/weko-index-tree/.tox/c1/tmp

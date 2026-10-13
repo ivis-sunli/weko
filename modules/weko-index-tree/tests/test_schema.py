@@ -222,7 +222,7 @@ class TestIndexCreateRequestSchema:
         with pytest.raises(ValidationError) as excinfo:
             schema.load(json)
         assert "index" in excinfo.value.messages
-        assert "parent" in excinfo.value.messages["index"]
+        assert excinfo.value.messages["index"] == ["Missing data for required field."]
 
         json = {
             "index": {}

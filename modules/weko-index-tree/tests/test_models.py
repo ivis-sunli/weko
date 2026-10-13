@@ -1,3 +1,4 @@
+from flask_babel import refresh
 from mock import patch
 
 from weko_index_tree.models import Index, IndexStyle
@@ -36,8 +37,10 @@ def test_Index(app, db, test_indices):
     # __str__
     res = Index.get_index_by_id(1)
     with app.test_request_context(headers=[("Accept-Language", "en")]):
+        refresh()
         assert str(res) == "Index <id=1, name=Test index 1>"
     with app.test_request_context(headers=[("Accept-Language", "ja")]):
+        refresh()
         assert str(res) == "Index <id=1, name=テストインデックス 1>"
 
 

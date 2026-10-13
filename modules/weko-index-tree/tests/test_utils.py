@@ -27,7 +27,6 @@ from invenio_records.models import RecordMetadata
 from invenio_search import RecordsSearch
 from invenio_search.engine import search, dsl
 from simplekv.memory.redisstore import RedisStore
-from elasticsearch import helpers
 
 from weko_index_tree.api import Indexes
 from weko_index_tree.errors import IndexDeletedRESTError, IndexBaseRESTError
@@ -589,7 +588,7 @@ def test_get_record_in_search_of_index(i18n_app, indices, db_records, search_ind
     def _generate_search_data(num, start_datetime=datetime.now()):
         for i in range(num):
             doc = {
-                "_index": i18n_app.config['INDEXER_DEFAULT_INDEX'],
+                "_index": i18n_app.config['SEARCH_INDEX_PREFIX'] + i18n_app.config['INDEXER_DEFAULT_INDEX'],
                 "_type": "item-v1.0.0",
                 "_id": f"2d1a2520-9080-437f-a304-230adc8{i:05d}",
                 "_source": {

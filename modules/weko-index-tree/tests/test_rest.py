@@ -309,8 +309,8 @@ class TestIndexActionResource:
         url = url_for("weko_index_tree_rest.tid_index_action",index_id="1")
         with patch("weko_search_ui.tasks.is_import_running", return_value=None), \
              patch("weko_index_tree.rest.is_index_locked", return_value=False), \
-             patch("weko_index_tree.rest.check_doi_in_index", return_value=True), \
-             patch("weko_index_tree.api.Indexes.update", return_value=False), \
+             patch("weko_index_tree.rest.check_doi_in_index", return_value=False) as check_doi, \
+             patch("weko_index_tree.api.Indexes.update", return_value=True) as update_index, \
              patch("weko_workflow.utils.get_cache_data", return_value=True):
             data = {
                 "public_date":"","public_state":False,
@@ -332,6 +332,10 @@ class TestIndexActionResource:
             assert redis_connect.redis.exists("index_reset_tree_ignore_more_view_test_en") == False
 
             # update with en
+            check_doi.assert_called_once_with(1)
+            update_index.assert_called_once_with(1, **data)
+            check_doi.return_value = True
+            update_index.reset_mock()
             AdminLangSettings.update_lang(lang_code="ja",is_registered=False,sequence=0)
             redis_connect.put("index_reset_tree_view_test_en","test_en_index_reset_tree".encode("UTF-8"),ttl_secs=30)
             redis_connect.put("index_reset_tree_ignore_more_view_test_en","test_en_index_reset_tree_ignore_more".encode("UTF-8"),ttl_secs=30)
@@ -340,6 +344,8 @@ class TestIndexActionResource:
             assert json.loads(res.data)=={'delete_flag': False,'errors': ['The index cannot be kept private because there are links from items that have a DOI.'],  'message': '','status': 200}
             assert redis_connect.redis.exists("index_reset_tree_view_test_en") == False
             assert redis_connect.redis.exists("index_reset_tree_ignore_more_view_test_en") == False
+
+            update_index.assert_not_called()
 
             data = {
                 "public_date":"","public_state":True,

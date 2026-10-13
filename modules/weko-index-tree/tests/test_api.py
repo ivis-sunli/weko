@@ -844,11 +844,39 @@ def test_indexes_get_index_tree(i18n_app, db, redis_connect, users, db_records, 
         res = Indexes.get_recursive_tree(32, with_deleted=True)
         assert res==[(3, 32, 1, 'テストインデックス 32', 'Test index link 32_ja', True, True, None, '3,-99', '1,2,3,4,-98,-99', 'g1,g2,-89', 'g1,g2,-89', False, 1, False, False, True)]
 
+        roles_by_name = {role.name: role for role in Role.query.all()}
+        role_ids = {str(i + 1): roles_by_name[name].id for i, name in enumerate([
+            'System Administrator', 'Repository Administrator', 'Contributor',
+            'Community Administrator', 'General', 'Original Role'
+        ])}
+        original_roles = {}
+        for index_id in (1, 22):
+            index = Indexes.get_index(index_id)
+            for field in ('browsing_role', 'contribute_role'):
+                original_roles[index_id, field] = getattr(index, field)
+                ids = getattr(index, field).split(',')
+                setattr(index, field, ','.join(role_ids.get(id_, id_) for id_ in ids))
+        db.session.commit()
+        expected_roles = {
+            name: {'id': role.id, 'name': name, 'is_managed': True,
+                   'version_id': role.version_id}
+            for name, role in roles_by_name.items()
+        }
+
+        def normalize_roles(index):
+            index = dict(index)
+            for field in ('browsing_role', 'contribute_role'):
+                index[field] = {
+                    key: sorted(value, key=lambda role: str(role['id']))
+                    for key, value in index[field].items()
+                }
+            return index
+
         # get_index_with_role
         res = Indexes.get_index_with_role(1)
-        assert res=={'biblio_flag': False, 'browsing_group': {'allow': [{'id': '-89', 'name': 'No Group'}],'deny': []}, 'browsing_role': {'allow': [{'id': 3, 'name': 'Contributor'}, {'id': -99, 'name': 'Guest'}], 'deny': [{'id': 4, 'name': 'Community Administrator'}, {'id': 5, 'name': 'General'}, {'id': 6, 'name': 'Original Role'}, {'id': -98, 'name': 'Authenticated User'}]}, 'comment': '', 'contribute_group': {'allow': [{'id': '-89', 'name': 'No Group'}], 'deny': []}, 'contribute_role': {'allow': [{'id': 3, 'name': 'Contributor'}, {'id': 4, 'name': 'Community Administrator'}, {'id': -98, 'name': 'Authenticated User'}, {'id': -99, 'name': 'Guest'}], 'deny': [{'id': 5, 'name': 'General'}, {'id': 6, 'name': 'Original Role'}]}, 'coverpage_state': True, 'display_format': '1', 'display_no': 0, 'harvest_public_state': True, 'harvest_spec': '', 'id': 1, 'image_name': '', 'index_link_enabled': True, 'index_link_name': 'Test index link 1_ja', 'index_link_name_english': 'Test index link 1_en', 'index_name': 'テストインデックス 1', 'index_name_english': 'Test index 1', 'is_deleted': False, 'more_check': False, 'online_issn': '1234-5678', 'owner_user_id': 0, 'parent': 0, 'position': 0, 'public_date': '20220101', 'public_state': True, 'recursive_browsing_group': True, 'recursive_browsing_role': True, 'recursive_contribute_group': True, 'recursive_contribute_role': True, 'recursive_coverpage_check': True, 'recursive_public_state': False, 'rss_status': False, 'cnri': '', 'index_url': ''}
+        assert normalize_roles(res)==normalize_roles({'biblio_flag': False, 'browsing_group': {'allow': [{'id': '-89', 'name': 'No Group'}],'deny': []}, 'browsing_role': {'allow': [expected_roles['Contributor'], {'id': -99, 'name': 'Guest'}], 'deny': [expected_roles['Community Administrator'], expected_roles['General'], expected_roles['Original Role'], {'id': -98, 'name': 'Authenticated User'}]}, 'comment': '', 'contribute_group': {'allow': [{'id': '-89', 'name': 'No Group'}], 'deny': []}, 'contribute_role': {'allow': [expected_roles['Contributor'], expected_roles['Community Administrator'], {'id': -98, 'name': 'Authenticated User'}, {'id': -99, 'name': 'Guest'}], 'deny': [expected_roles['General'], expected_roles['Original Role']]}, 'coverpage_state': True, 'display_format': '1', 'display_no': 0, 'harvest_public_state': True, 'harvest_spec': '', 'id': 1, 'image_name': '', 'index_link_enabled': True, 'index_link_name': 'Test index link 1_ja', 'index_link_name_english': 'Test index link 1_en', 'index_name': 'テストインデックス 1', 'index_name_english': 'Test index 1', 'is_deleted': False, 'more_check': False, 'online_issn': '1234-5678', 'owner_user_id': 0, 'parent': 0, 'position': 0, 'public_date': '20220101', 'public_state': True, 'recursive_browsing_group': True, 'recursive_browsing_role': True, 'recursive_contribute_group': True, 'recursive_contribute_role': True, 'recursive_coverpage_check': True, 'recursive_public_state': False, 'rss_status': False, 'cnri': '', 'index_url': ''})
         res = Indexes.get_index_with_role(22)
-        assert res=={'biblio_flag': True, 'browsing_group': {'allow': [{'id': '-89', 'name': 'No Group'}], 'deny': []}, 'browsing_role': {'allow': [{'id': 3, 'name': 'Contributor'}, {'id': -99, 'name': 'Guest'}], 'deny': [{'id': 4, 'name': 'Community Administrator'}, {'id': 5, 'name': 'General'}, {'id': 6, 'name': 'Original Role'}, {'id': -98, 'name': 'Authenticated User'}]}, 'comment': '', 'contribute_group': {'allow': [{'id': '-89', 'name': 'No Group'}], 'deny': []}, 'contribute_role': {'allow': [{'id': 3, 'name': 'Contributor'}, {'id': 4, 'name': 'Community Administrator'}, {'id': -98, 'name': 'Authenticated User'}, {'id': -99, 'name': 'Guest'}], 'deny': [{'id': 5, 'name': 'General'}, {'id': 6, 'name': 'Original Role'}]}, 'coverpage_state': False, 'display_format': '1', 'display_no': 1, 'harvest_public_state': True, 'harvest_spec': '', 'id': 22, 'image_name': '', 'index_link_enabled': True, 'index_link_name': 'Test index link 22_ja', 'index_link_name_english': 'Test index link 22_en', 'index_name': 'テストインデックス 22', 'index_name_english': 'Test index 22', 'is_deleted': False, 'more_check': False, 'online_issn': '', 'owner_user_id': 0, 'parent': 2, 'position': 1, 'public_date': '', 'public_state': True, 'recursive_browsing_group': False, 'recursive_browsing_role': False, 'recursive_contribute_group': False, 'recursive_contribute_role': False, 'recursive_coverpage_check': False, 'recursive_public_state': True, 'rss_status': False, 'cnri': '', 'index_url': ''}
+        assert normalize_roles(res)==normalize_roles({'biblio_flag': True, 'browsing_group': {'allow': [{'id': '-89', 'name': 'No Group'}], 'deny': []}, 'browsing_role': {'allow': [expected_roles['Contributor'], {'id': -99, 'name': 'Guest'}], 'deny': [expected_roles['Community Administrator'], expected_roles['General'], expected_roles['Original Role'], {'id': -98, 'name': 'Authenticated User'}]}, 'comment': '', 'contribute_group': {'allow': [{'id': '-89', 'name': 'No Group'}], 'deny': []}, 'contribute_role': {'allow': [expected_roles['Contributor'], expected_roles['Community Administrator'], {'id': -98, 'name': 'Authenticated User'}, {'id': -99, 'name': 'Guest'}], 'deny': [expected_roles['General'], expected_roles['Original Role']]}, 'coverpage_state': False, 'display_format': '1', 'display_no': 1, 'harvest_public_state': True, 'harvest_spec': '', 'id': 22, 'image_name': '', 'index_link_enabled': True, 'index_link_name': 'Test index link 22_ja', 'index_link_name_english': 'Test index link 22_en', 'index_name': 'テストインデックス 22', 'index_name_english': 'Test index 22', 'is_deleted': False, 'more_check': False, 'online_issn': '', 'owner_user_id': 0, 'parent': 2, 'position': 1, 'public_date': '', 'public_state': True, 'recursive_browsing_group': False, 'recursive_browsing_role': False, 'recursive_contribute_group': False, 'recursive_contribute_role': False, 'recursive_coverpage_check': False, 'recursive_public_state': True, 'rss_status': False, 'cnri': '', 'index_url': ''})
 
         with patch("weko_index_tree.api.Indexes.get_account_role", return_value=[]):
             res = Indexes.get_index_with_role(1)
@@ -858,6 +886,10 @@ def test_indexes_get_index_tree(i18n_app, db, redis_connect, users, db_records, 
             mock_query.all.return_value = [Group(id="g1", name="g1"), Group(id="g2", name="g2"), Group(id="g3", name="g3")]
             res = Indexes.get_index_with_role(1)
             assert res["browsing_group"]==res["contribute_group"]=={'allow': [{'id': "g1", 'name': 'g1'}, {'id': "g2", 'name': 'g2'}, {'id': "-89", 'name': 'No Group'}], 'deny': [{'id': "g3", 'name': 'g3'}]}
+
+        for (index_id, field), value in original_roles.items():
+            setattr(Indexes.get_index(index_id), field, value)
+        db.session.commit()
 
         # get_index
         res = Indexes.get_index(2)
