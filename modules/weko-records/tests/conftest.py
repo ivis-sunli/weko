@@ -55,7 +55,8 @@ from invenio_pidstore import InvenioPIDStore
 from invenio_records import InvenioRecords
 from invenio_search import InvenioSearch, current_search_client
 from invenio_search.engine import dsl
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy.engine.url import make_url
+from sqlalchemy_utils.functions import create_database, drop_database
 from tests.helpers import json_data, create_record
 
 from weko_accounts import WekoAccounts
@@ -94,6 +95,9 @@ def instance_path():
 def base_app(instance_path):
     """Flask application fixture."""
     app_ = Flask('testapp', instance_path=instance_path)
+    database_url = make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+        database='weko_records_test_' + uuid.uuid4().hex)
+    search_name = 'weko-records-test-' + uuid.uuid4().hex
     app_.logger.setLevel('DEBUG')
     app_.config.update(
         CELERY_ALWAYS_EAGER=True,
@@ -104,8 +108,7 @@ def base_app(instance_path):
         SECURITY_PASSWORD_SALT="CHANGE_ME_ALSO",
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #     'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                           'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_url,
         SEARCH_OPENSEARCH_HOSTS=os.environ.get(
             'SEARCH_OPENSEARCH_HOSTS', 'opensearch'),
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
@@ -114,9 +117,9 @@ def base_app(instance_path):
         THEME_SITEURL="https://localhost",
         WEKO_ITEMTYPE_EXCLUDED_KEYS=WEKO_ITEMTYPE_EXCLUDED_KEYS,
         INDEX_IMG='indextree/36466818-image.jpg',
-        SEARCH_UI_SEARCH_INDEX='test-weko',
+        SEARCH_UI_SEARCH_INDEX=search_name,
         INDEXER_FILE_DOC_TYPE='content',
-        INDEXER_DEFAULT_INDEX="{}-weko-item-v1.0.0".format('test'),
+        INDEXER_DEFAULT_INDEX=search_name + '-item-v1.0.0',
         I18N_LANGUAGES=[("ja", "Japanese"), ("en", "English")],
         WEKO_PERMISSION_SUPER_ROLE_USER=WEKO_PERMISSION_SUPER_ROLE_USER,
         WEKO_PERMISSION_ROLE_COMMUNITY=WEKO_PERMISSION_ROLE_COMMUNITY,
@@ -183,18 +186,21 @@ def client(app):
 @pytest.fixture()
 def db(app):
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    database_url = db_.engine.url
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
 
 
 @pytest.fixture()
-def location(app):
+def location(app, tmp_path):
     """Create default location."""
-    tmppath = tempfile.mkdtemp()
+    tmppath = str(tmp_path)
     with db_.session.begin_nested():
         Location.query.delete()
         loc = Location(name='local', uri=tmppath, default=True)
@@ -570,26 +576,20 @@ def db_index(app, db):
 
 @pytest.fixture()
 def search_index(app):
-    current_search_client.indices.delete(index="test-*")
+    index_name = app.config['INDEXER_DEFAULT_INDEX']
     with open("tests/data/item-v1.0.0.json", "r") as f:
         mapping = json.load(f)
+    created = False
     try:
-        current_search_client.indices.create(
-            "test-weko-item-v1.0.0", body=mapping
-        )
+        current_search_client.indices.create(index_name, body=mapping)
+        created = True
         current_search_client.indices.put_alias(
-            index="test-weko-item-v1.0.0", name="test-weko"
+            index=index_name, name=app.config['SEARCH_UI_SEARCH_INDEX']
         )
-    except:
-        current_search_client.indices.create("test-weko-items", body=mapping)
-        current_search_client.indices.put_alias(
-            index="test-weko-items", name="test-weko"
-        )
-
-    try:
         yield current_search_client
     finally:
-        current_search_client.indices.delete(index="test-*")
+        if created:
+            current_search_client.indices.delete(index=index_name)
 
 
 @pytest.fixture()

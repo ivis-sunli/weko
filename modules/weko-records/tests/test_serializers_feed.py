@@ -186,7 +186,7 @@ def test__create_atom(app):
 
 
 # def atom_file(self, filename, extensions=True, pretty=False, encoding='UTF-8', xml_declaration=True):
-def test_atom_file(app):
+def test_atom_file(app, tmp_path):
     sample_copy = deepcopy(sample)
     data1 = MagicMock()
     
@@ -196,7 +196,7 @@ def test_atom_file(app):
     data1.extend_ns = extend_ns
 
     sample_copy._WekoFeedGenerator__extensions["atom"]["inst"] = data1
-    assert sample_copy.atom_file(filename="test") == None
+    assert sample_copy.atom_file(filename=str(tmp_path / "test")) == None
 
 
 # def _create_rss(self, extensions=True): 
@@ -225,7 +225,7 @@ def test__create_rss(app):
 
 
 # def rss_file(self, filename, extensions=True, pretty=False, encoding='UTF-8', xml_declaration=True): 
-def test_rss_file(app):
+def test_rss_file(app, tmp_path):
     sample_copy = deepcopy(sample)
     data1 = MagicMock()
     
@@ -235,7 +235,7 @@ def test_rss_file(app):
     data1.extend_ns = extend_ns
 
     sample_copy._WekoFeedGenerator__extensions["atom"]["inst"] = data1
-    assert sample_copy.rss_file(filename="filename") == None
+    assert sample_copy.rss_file(filename=str(tmp_path / "filename")) == None
 
 
 # def updated(self, updated=None):

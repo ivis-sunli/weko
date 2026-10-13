@@ -494,7 +494,7 @@ def test__get_records_by_item_type_name(app, search_index):
     def _generate_search_data(num, start_datetime=datetime.now()):
         for i in range(num):
             doc = {
-                "_index": "test-weko-item-v1.0.0",
+                "_index": app.config["INDEXER_DEFAULT_INDEX"],
                 "_type": "item-v1.0.0",
                 "_id": f"2d1a2520-9080-437f-a304-230adc8{i:05d}",
                 "_source": {
