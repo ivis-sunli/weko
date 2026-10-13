@@ -32,7 +32,7 @@ import uuid
 from datetime import datetime,timedelta
 from flask import Flask
 from flask_menu import Menu
-from flask_babel import Babel
+from flask_babel import Babel, refresh
 from invenio_accounts import InvenioAccounts
 from invenio_accounts.models import User, Role
 from invenio_accounts.testutils import create_test_user
@@ -41,6 +41,7 @@ from invenio_access.models import ActionRoles, ActionUsers
 from invenio_admin import InvenioAdmin
 from invenio_assets import InvenioAssets
 from invenio_cache import InvenioCache
+from invenio_celery import InvenioCelery
 from invenio_communities.models import Community
 from invenio_db import InvenioDB, db as db_
 from invenio_deposit import InvenioDeposit
@@ -119,11 +120,27 @@ def instance_path():
     shutil.rmtree(path)
 
 
+@pytest.fixture(scope="session")
+def database_uri():
+    from sqlalchemy.engine.url import make_url
+
+    url = make_url(os.environ['SQLALCHEMY_DATABASE_URI'])
+    url = url.set(database='weko_deposit_test_' + uuid.uuid4().hex)
+    uri = url.render_as_string(hide_password=False)
+    create_database(uri)
+    try:
+        yield uri
+    finally:
+        drop_database(uri)
+
+
 @pytest.fixture()
-def base_app(instance_path):
+def base_app(instance_path, database_uri):
     """Flask application fixture."""
 
     app_ = Flask('testapp', instance_path=instance_path)
+    resource_prefix = 'test-deposit-' + uuid.uuid4().hex
+    item_index = resource_prefix + '-weko-item-v1.0.0'
     app_.url_map.converters["pid"] = PIDConverter
     # initialize InvenioDeposit first in order to detect any invalid dependency
     DEPOSIT_REST_ENDPOINTS = copy.deepcopy(_DEPOSIT_REST_ENDPOINTS)
@@ -140,20 +157,22 @@ def base_app(instance_path):
     app_.config.update(
         CELERY_ALWAYS_EAGER=True,
         CELERY_CACHE_BACKEND="memory",
-        CELERY_EAGER_PROPAGATES_EXCEPTIONS=True,
+        BROKER_URL="memory://",
+        task_eager_propagates=True,
         CELERY_RESULT_BACKEND="cache",
         CACHE_REDIS_URL=os.environ.get(
             "CACHE_REDIS_URL", "redis://redis:6379/0"
         ),
         CACHE_REDIS_DB=0,
+        CACHE_KEY_PREFIX=resource_prefix + "_",
+        WEKO_DEPOSIT_ITEMS_CACHE_PREFIX=resource_prefix + "_items_{pid_value}",
         # WEKO_DEPOSIT_ITEMS_CACHE_PREFIX=WEKO_DEPOSIT_ITEMS_CACHE_PREFIX,
         CACHE_REDIS_HOST="redis",
         REDIS_PORT="6379",
         JSONSCHEMAS_URL_SCHEME="http",
         SECRET_KEY="CHANGE_ME",
         SECURITY_PASSWORD_SALT="CHANGE_ME_ALSO",
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_uri,
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
         SQLALCHEMY_ECHO=False,
         TESTING=True,
@@ -165,8 +184,8 @@ def base_app(instance_path):
         OAUTHLIB_INSECURE_TRANSPORT=True,
         OAUTH2_CACHE_TYPE="simple",
         ACCOUNTS_JWT_ENABLE=False,
-        INDEXER_DEFAULT_INDEX="{}-weko-item-v1.0.0".format("test"),
-        SEARCH_UI_SEARCH_INDEX="{}-weko-item-v1.0.0".format("test"),
+        INDEXER_DEFAULT_INDEX=item_index,
+        SEARCH_UI_SEARCH_INDEX=item_index,
         INDEXER_FILE_DOC_TYPE="content",
         WEKO_BUCKET_QUOTA_SIZE=WEKO_BUCKET_QUOTA_SIZE,
         WEKO_MAX_FILE_SIZE=WEKO_BUCKET_QUOTA_SIZE,
@@ -191,6 +210,7 @@ def base_app(instance_path):
         ],
         WEKO_DEPOSIT_MAX_BACK_OFF_TIME=2,
         WEKO_PERMISSION_ROLE_COMMUNITY=["Community Administrator"],
+        WEKO_MIMETYPE_WHITELIST_FOR_SEARCH = _WEKO_MIMETYPE_WHITELIST_FOR_SEARCH,
         WEKO_DEPOSIT_TEXTMIMETYPE_WHITELIST_FOR_SEARCH = _WEKO_DEPOSIT_TEXTMIMETYPE_WHITELIST_FOR_SEARCH,
         WEKO_SCHEMA_JPCOAR_V2_SCHEMA_NAME="jpcoar_mapping",
         WEKO_SCHEMA_JPCOAR_V2_RESOURCE_TYPE_REPLACE={
@@ -200,7 +220,7 @@ def base_app(instance_path):
             'report part':'other',
             'conference object':'conference output',
         },
-        WEKO_AUTHORS_SEARCH_INDEX_NAME="test-authors",
+        WEKO_AUTHORS_SEARCH_INDEX_NAME=resource_prefix + "-authors",
         WEKO_DEPOSIT_BIBLIOGRAPHIC_INFO_SYS_KEY=_WEKO_DEPOSIT_BIBLIOGRAPHIC_INFO_SYS_KEY,
         SEARCH_OPENSEARCH_HOSTS=os.environ.get(
             'SEARCH_OPENSEARCH_HOSTS', 'opensearch'
@@ -234,6 +254,7 @@ def base_app(instance_path):
     InvenioAdmin(app_)
     InvenioAssets(app_)
     InvenioCache(app_)
+    InvenioCelery(app_)
     InvenioDB(app_)
     InvenioDeposit(app_)
     InvenioFilesREST(app_)
@@ -257,6 +278,10 @@ def base_app(instance_path):
     Menu(app_)
     app_.register_blueprint(invenio_files_rest_blueprint)  # invenio_files_rest
     WekoLoggingUserActivity(app_)
+    @app_.teardown_request
+    def clear_locale(exception):
+        refresh()
+
     return app_
 
 
@@ -279,22 +304,23 @@ def app(base_app):
         timeout=60
     )
 
-    open_search.indices.create(
-        index=base_app.config["INDEXER_DEFAULT_INDEX"], body=mapping, ignore=[400, 404]
-    )
-    open_search.indices.put_alias(
-        index=base_app.config["INDEXER_DEFAULT_INDEX"],
-        name=base_app.config["SEARCH_UI_SEARCH_INDEX"],
-        ignore=[400, 404],
-    )
-    with base_app.app_context():
-        yield base_app
-    open_search.indices.delete_alias(
-        index=base_app.config["INDEXER_DEFAULT_INDEX"],
-        name=base_app.config["SEARCH_UI_SEARCH_INDEX"],
-        ignore=[400, 404],
-    )
-    open_search.indices.delete(index=base_app.config["INDEXER_DEFAULT_INDEX"], ignore=[400, 404])
+    try:
+        open_search.indices.create(
+            index=base_app.config["INDEXER_DEFAULT_INDEX"], body=mapping
+        )
+        with base_app.app_context():
+            yield base_app
+    finally:
+        open_search.indices.delete(
+            index=base_app.config["INDEXER_DEFAULT_INDEX"], ignore=[404]
+        )
+        open_search.close()
+        with base_app.app_context():
+            connection = RedisConnection().connection(db=base_app.config['CACHE_REDIS_DB'])
+            keys = list(connection.scan_iter(match=base_app.config['CACHE_KEY_PREFIX'] + '*'))
+            if keys:
+                connection.delete(*keys)
+            connection.close()
 
 @pytest.yield_fixture()
 def i18n_app(app):
@@ -307,15 +333,44 @@ def i18n_app(app):
         app.extensions['invenio-i18n'].language = "ja"
         yield app
 
+@pytest.fixture(scope="session")
+def database_schema(database_uri):
+    return set()
+
+
 @pytest.yield_fixture()
-def db(app):
+def db(app, database_schema, database_uri):
     """Database fixture."""
+    from sqlalchemy.engine.url import make_url
+
+    if db_.engine.url != make_url(database_uri):
+        raise RuntimeError("Database fixture must use its session-owned database")
     if not database_exists(str(db_.engine.url)):
         create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    try:
+        if set(db_.metadata.tables) != database_schema:
+            db_.create_all()
+            database_schema.update(db_.metadata.tables)
+        yield db_
+    finally:
+        db_.session.close()
+        db_.session.remove()
+        engine = db_.engine
+        table_names = [
+            engine.dialect.identifier_preparer.format_table(table)
+            for table in db_.metadata.tables.values()
+        ]
+        with engine.begin() as connection:
+            connection.execute(db_.text(
+                "TRUNCATE {} RESTART IDENTITY CASCADE".format(
+                    ", ".join(table_names))))
+        engine.dispose()
+
+@pytest.fixture()
+def request_context(app):
+    with app.test_request_context():
+        yield
+
 
 @pytest.fixture()
 def redis_connect(app):
@@ -738,7 +793,7 @@ def db_itemtype2(app, db):
         "item_type_mapping": item_type_mapping,
     }
 @pytest.fixture()
-def search_records(app, user_activity_log_partition_table, db, db_index, location, db_itemtype,db_oaischema):
+def search_records_factory(app, user_activity_log_partition_table, db, db_index, location, db_itemtype,db_oaischema):
 
     indexer = WekoIndexer()
     indexer.get_search_index()
@@ -747,10 +802,14 @@ def search_records(app, user_activity_log_partition_table, db, db_index, locatio
     db.session.begin_nested()
 
     with app.test_request_context():
-        for i in range(1, 10):
-            record_data =  {"_oai": {"id": "oai:weko3.example.org:000000{:02d}".format(i), "sets": ["{}".format((i % 2) + 1)]}, "path": ["{}".format((i % 2) + 1)], "owner": "1", "weko_shared_ids": [], "recid": "{}".format(i), "title": ["title"], "pubdate": {"attribute_name": "PubDate", "attribute_value": "2022-08-20"}, "_buckets": {"deposit": "3e99cfca-098b-42ed-b8a0-20ddd09b3e02","content":[{"test":"content"},{"file":"test"}]}, "_deposit": {"id": "{}".format(i), "pid": {"type": "depid", "value": "{}".format(i), "revision_id": 0}, "owner": "1", "owners": [1], "status": "draft", "created_by": 1, "owners_ext": {"email": "wekosoftware@nii.ac.jp", "username": "", "displayname": ""}}, "item_title": "title", "author_link": [], "item_type_id": "1", "publish_date": "2022-08-20", "publish_status": "0", "weko_shared_id": -1, "item_1617186331708": {"attribute_name": "Title", "attribute_value_mlt": [{"subitem_1551255647225": "タイトル", "subitem_1551255648112": "ja"},{"subitem_1551255647225": "title", "subitem_1551255648112": "en"}]}, "item_1617258105262": {"attribute_name": "Resource Type","content":[{"test":"content"},{"file":"test"}], "attribute_value_mlt": [{"resourceuri": "http://purl.org/coar/resource_type/c_5794", "resourcetype": "conference paper"}]}, "relation_version_is_last": True, 'item_1617605131499': {'attribute_name': 'File', 'attribute_type': 'file', 'attribute_value_mlt': [{'url': {'url': 'https://weko3.example.org/record/{}/files/hello.txt'.format(i)}, 'date': [{'dateType': 'Available', 'dateValue': '2022-09-07'}], 'format': 'plain/text', 'filename': 'hello.txt', 'filesize': [{'value': '146 KB'}], 'accessrole': 'open_access', 'version_id': '', 'mimetype': 'application/pdf',"file": "",}]}}
+        def create_search_record(i, index_id, missing_oai_sets=False):
+            record_data =  {"_oai": {"id": "oai:weko3.example.org:000000{}".format(str(i).zfill(2)), "sets": [str(index_id)]}, "path": [str(index_id)], "owner": "1", "weko_shared_ids": [], "recid": "{}".format(i), "title": ["title"], "pubdate": {"attribute_name": "PubDate", "attribute_value": "2022-08-20"}, "_buckets": {"deposit": "3e99cfca-098b-42ed-b8a0-20ddd09b3e02","content":[{"test":"content"},{"file":"test"}]}, "_deposit": {"id": "{}".format(i), "pid": {"type": "depid", "value": "{}".format(i), "revision_id": 0}, "owner": "1", "owners": [1], "status": "draft", "created_by": 1, "owners_ext": {"email": "wekosoftware@nii.ac.jp", "username": "", "displayname": ""}}, "item_title": "title", "author_link": [], "item_type_id": "1", "publish_date": "2022-08-20", "publish_status": "0", "weko_shared_id": -1, "item_1617186331708": {"attribute_name": "Title", "attribute_value_mlt": [{"subitem_1551255647225": "タイトル", "subitem_1551255648112": "ja"},{"subitem_1551255647225": "title", "subitem_1551255648112": "en"}]}, "item_1617258105262": {"attribute_name": "Resource Type","content":[{"test":"content"},{"file":"test"}], "attribute_value_mlt": [{"resourceuri": "http://purl.org/coar/resource_type/c_5794", "resourcetype": "conference paper"}]}, "relation_version_is_last": True, 'item_1617605131499': {'attribute_name': 'File', 'attribute_type': 'file', 'attribute_value_mlt': [{'url': {'url': 'https://weko3.example.org/record/{}/files/hello.txt'.format(i)}, 'date': [{'dateType': 'Available', 'dateValue': '2022-09-07'}], 'format': 'plain/text', 'filename': 'hello.txt', 'filesize': [{'value': '146 KB'}], 'accessrole': 'open_access', 'version_id': '', 'mimetype': 'application/pdf',"file": "",}]}}
             item_data = {"id": "{}".format(i), "pid": {"type": "depid", "value": "{}".format(i), "revision_id": 0}, "lang": "ja", "owner": "1", "title": "title", "owners": [1], "status": "published", "$schema": "/items/jsonschema/1", "pubdate": "2022-08-20", "created_by": 1, "owners_ext": {"email": "wekosoftware@nii.ac.jp", "username": "", "displayname": ""}, "shared_user_ids": [], "item_1617186331708": [{"subitem_1551255647225": "タイトル", "subitem_1551255648112": "ja"},{"subitem_1551255647225": "title", "subitem_1551255648112": "en"}], "item_1617258105262": {"resourceuri": "http://purl.org/coar/resource_type/c_5794", "resourcetype": "conference paper"}}
 
+            record_data['relation_version_is_last'] = '.' not in str(i)
+            if missing_oai_sets:
+                record_data['path'] = ['11', str(index_id)]
+                del record_data['_oai']['sets']
             rec_uuid = uuid.uuid4()
 
             recid = PersistentIdentifier.create('recid', str(i),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
@@ -759,6 +818,7 @@ def search_records(app, user_activity_log_partition_table, db, db_index, locatio
             db.session.add(rel)
             parent = None
             doi = None
+            hdl = None
             parent = PersistentIdentifier.create('parent', "parent:{}".format(i),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
             rel = PIDRelation.create(parent,recid,0,0)
             db.session.add(rel)
@@ -766,7 +826,8 @@ def search_records(app, user_activity_log_partition_table, db, db_index, locatio
                 doi = PersistentIdentifier.create('doi', "https://doi.org/10.xyz/{}".format((str(i)).zfill(10)),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
                 hdl = PersistentIdentifier.create('hdl', "https://hdl.handle.net/0000/{}".format((str(i)).zfill(10)),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
 
-            record = WekoRecord.create(record_data, id_=rec_uuid)
+            record_data['owners'] = record_data['_deposit']['owners'][:]
+            record = WekoRecord.create(record_data, id_=rec_uuid, with_bucket=False)
             # from io import BytesIO
             from invenio_files_rest.models import Bucket
             from invenio_records_files.models import RecordsBuckets
@@ -786,7 +847,29 @@ def search_records(app, user_activity_log_partition_table, db, db_index, locatio
 
             results.append({"depid":depid, "recid":recid, "parent": parent, "doi":doi, "hdl": hdl,"record":record, "record_data":record_data,"item":item , "item_data":item_data,"deposit": deposit, "rec_uuid":rec_uuid, "version_id":obj.version_id})
 
-    time.sleep(3)
+    return indexer, results, create_search_record
+
+
+@pytest.fixture()
+def search_records(app, search_records_factory):
+    indexer, results, create_search_record = search_records_factory
+    with app.test_request_context():
+        for i in range(1, 10):
+            create_search_record(i, (i % 2) + 1)
+    indexer.client.indices.refresh(index=indexer.search_index)
+    return indexer, results
+
+
+@pytest.fixture()
+def versioned_search_records(app, search_records_factory):
+    indexer, results, create_search_record = search_records_factory
+    with app.test_request_context():
+        for i in range(1, 10):
+            create_search_record(i, (i % 2) + 1)
+        for i, index_id in [(10, 4), (10.1, 3), (10.2, 4)]:
+            create_search_record(i, index_id)
+        create_search_record(11, 5, missing_oai_sets=True)
+    indexer.client.indices.refresh(index=indexer.search_index)
     return indexer, results
 
 
@@ -818,7 +901,8 @@ def search_records_1(app, user_activity_log_partition_table, db, db_index, locat
                 doi = PersistentIdentifier.create('doi', "https://doi.org/10.xyz/{}".format((str(i)).zfill(10)),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.RESERVED)
                 hdl = PersistentIdentifier.create('hdl', "https://hdl.handle.net/0000/{}".format((str(i)).zfill(10)),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.RESERVED)
 
-            record = WekoRecord.create(record_data, id_=rec_uuid)
+            record_data['owners'] = record_data['_deposit']['owners'][:]
+            record = WekoRecord.create(record_data, id_=rec_uuid, with_bucket=False)
             # from io import BytesIO
             from invenio_files_rest.models import Bucket
             from invenio_records_files.models import RecordsBuckets
@@ -839,7 +923,7 @@ def search_records_1(app, user_activity_log_partition_table, db, db_index, locat
 
             results.append({"depid":depid, "recid":recid, "parent": parent, "doi":doi, "hdl": hdl,"record":record, "record_data":record_data,"item":item , "item_data":item_data,"deposit": deposit, "rec_uuid":rec_uuid})
 
-    time.sleep(3)
+    indexer.client.indices.refresh(index=indexer.search_index)
     return indexer, results
 
 
@@ -892,7 +976,8 @@ def search_records_2(app, user_activity_log_partition_table, db, db_index, locat
                 doi = PersistentIdentifier.create('doi', "https://doi.org/10.xyz/{}".format((str(i)).zfill(10)),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
                 hdl = PersistentIdentifier.create('hdl', "https://hdl.handle.net/0000/{}".format((str(i)).zfill(10)),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
 
-            record = WekoRecord.create(record_data, id_=rec_uuid)
+            record_data['owners'] = record_data['_deposit']['owners'][:]
+            record = WekoRecord.create(record_data, id_=rec_uuid, with_bucket=False)
             # from io import BytesIO
             from invenio_files_rest.models import Bucket
             from invenio_records_files.models import RecordsBuckets
@@ -911,7 +996,7 @@ def search_records_2(app, user_activity_log_partition_table, db, db_index, locat
 
             results.append({"depid":depid, "recid":recid, "parent": parent, "doi":doi, "hdl": hdl,"record":record, "record_data":record_data,"item":item , "item_data":item_data,"deposit": deposit, "rec_uuid":rec_uuid, "version_id":obj.version_id})
 
-    time.sleep(3)
+    indexer.client.indices.refresh(index=indexer.search_index)
     return indexer, results
 
 @pytest.fixture()
@@ -930,7 +1015,8 @@ def search_records_3(app, user_activity_log_partition_table, db, db_index, locat
 
             parent = None
             doi = None
-            record = WekoRecord.create(record_data, id_=rec_uuid)
+            record_data['owners'] = record_data['_deposit']['owners'][:]
+            record = WekoRecord.create(record_data, id_=rec_uuid, with_bucket=False)
             # from io import BytesIO
             from invenio_files_rest.models import Bucket
             from invenio_records_files.models import RecordsBuckets
@@ -956,7 +1042,7 @@ def search_records_3(app, user_activity_log_partition_table, db, db_index, locat
         "rec_uuid": rec_uuid,
         "version_id": obj.version_id,
     })
-    time.sleep(3)
+    indexer.client.indices.refresh(index=indexer.search_index)
     return indexer, results
 
 
@@ -977,7 +1063,8 @@ def search_records_4(app, user_activity_log_partition_table, db, db_index, locat
             parent = None
             doi = None
 
-            record = WekoRecord.create(record_data, id_=rec_uuid)
+            record_data['owners'] = record_data['_deposit']['owners'][:]
+            record = WekoRecord.create(record_data, id_=rec_uuid, with_bucket=False)
             # from io import BytesIO
             from invenio_files_rest.models import Bucket
             from invenio_records_files.models import RecordsBuckets
@@ -993,7 +1080,7 @@ def search_records_4(app, user_activity_log_partition_table, db, db_index, locat
 
             results.append({"depid":"2", "recid":'1', "parent": parent, "doi":doi, "hdl": "3","record":record, "record_data":record_data,"item":item , "item_data":item_data,"deposit": deposit})
 
-    time.sleep(3)
+    indexer.client.indices.refresh(index=indexer.search_index)
     return indexer, results
 
 
@@ -1069,7 +1156,8 @@ def search_records_5(app, user_activity_log_partition_table, db, db_index, locat
                 doi = PersistentIdentifier.create('doi', "https://doi.org/10.xyz/{}".format((str(i)).zfill(10)),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
                 hdl = PersistentIdentifier.create('hdl', "https://hdl.handle.net/0000/{}".format((str(i)).zfill(10)),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
 
-            record = WekoRecord.create(record_data, id_=rec_uuid)
+            record_data['owners'] = record_data['_deposit']['owners'][:]
+            record = WekoRecord.create(record_data, id_=rec_uuid, with_bucket=False)
             # from io import BytesIO
             from invenio_files_rest.models import Bucket
             from invenio_records_files.models import RecordsBuckets
@@ -1089,7 +1177,7 @@ def search_records_5(app, user_activity_log_partition_table, db, db_index, locat
 
             results.append({"depid":depid, "recid":recid, "parent": parent, "doi":doi, "hdl": hdl,"record":record, "record_data":record_data,"item":item , "item_data":item_data,"deposit": deposit, "rec_uuid":rec_uuid, "version_id":obj.version_id})
 
-    time.sleep(3)
+    indexer.client.indices.refresh(index=indexer.search_index)
     return indexer, results
 
 
@@ -1177,8 +1265,9 @@ def search_records_6(app, user_activity_log_partition_table, db, db_index, locat
                 doi = PersistentIdentifier.create('doi', "https://doi.org/10.xyz/{}".format((str(i)).zfill(10)),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
                 hdl = PersistentIdentifier.create('hdl', "https://hdl.handle.net/0000/{}".format((str(i)).zfill(10)),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
 
-            record = WekoRecord.create(record_data, id_=rec_uuid)
-            record_0 = WekoRecord.create(record_data, id_=rec_uuid_0)
+            record_data['owners'] = record_data['_deposit']['owners'][:]
+            record = WekoRecord.create(record_data, id_=rec_uuid, with_bucket=False)
+            record_0 = WekoRecord.create(record_data, id_=rec_uuid_0, with_bucket=False)
             # from io import BytesIO
             from invenio_files_rest.models import Bucket
             from invenio_records_files.models import RecordsBuckets
@@ -1204,7 +1293,7 @@ def search_records_6(app, user_activity_log_partition_table, db, db_index, locat
 
             results.append({"depid":depid, "recid":recid, "parent": parent, "doi":doi, "hdl": hdl,"record":record, "record_data":record_data,"item":item , "item_data":item_data,"deposit": deposit, "rec_uuid":rec_uuid, "version_id":obj.version_id})
 
-    time.sleep(3)
+    indexer.client.indices.refresh(index=indexer.search_index)
     return indexer, results
 
 
@@ -1225,7 +1314,8 @@ def search_records_7(app, user_activity_log_partition_table, db, db_index, locat
             parent = None
             doi = None
 
-            record = WekoRecord.create(record_data, id_=rec_uuid)
+            record_data['owners'] = record_data['_deposit']['owners'][:]
+            record = WekoRecord.create(record_data, id_=rec_uuid, with_bucket=False)
             # from io import BytesIO
             from invenio_files_rest.models import Bucket
             from invenio_records_files.models import RecordsBuckets
@@ -1243,7 +1333,7 @@ def search_records_7(app, user_activity_log_partition_table, db, db_index, locat
 
             results.append({"depid":"2", "recid":'1', "parent": parent, "doi":doi, "hdl": "3","record":record, "record_data":record_data,"item":item , "item_data":item_data,"deposit": deposit})
 
-    time.sleep(3)
+    indexer.client.indices.refresh(index=indexer.search_index)
     return indexer, results
 
 
@@ -1264,7 +1354,8 @@ def search_records_8(app, user_activity_log_partition_table, db, db_index, locat
             doi = None
             hdl = None
 
-            record = WekoRecord.create(record_data, id_=rec_uuid)
+            record_data['owners'] = record_data['_deposit']['owners'][:]
+            record = WekoRecord.create(record_data, id_=rec_uuid, with_bucket=False)
             from invenio_files_rest.models import Bucket
             bucket = Bucket.create()
             from invenio_records_files.models import RecordsBuckets
@@ -1281,7 +1372,7 @@ def search_records_8(app, user_activity_log_partition_table, db, db_index, locat
 
             results.append({"depid":'1', "recid":'1', "parent": parent, "doi":doi, "hdl": hdl,"record":record, "record_data":record_data,"item":item , "item_data":item_data,"deposit": deposit, "rec_uuid":rec_uuid})
 
-    time.sleep(3)
+    indexer.client.indices.refresh(index=indexer.search_index)
     return indexer, results
 
 @pytest.fixture()
@@ -1308,6 +1399,7 @@ def search_records_with_draft(app, user_activity_log_partition_table, db, db_ind
             db.session.commit()
             recids.append(recid)
 
+            record_data['owners'] = record_data['_deposit']['owners'][:]
             record = WekoRecord.create(record_data, id_=rec_uuid)
             deposit = aWekoDeposit(record, record.model)
             item = ItemsMetadata.create(item_data, id_=rec_uuid)
@@ -1321,7 +1413,7 @@ def search_records_with_draft(app, user_activity_log_partition_table, db, db_ind
             db.session.add(rel)
         db.session.commit()
 
-    time.sleep(3)
+    indexer.client.indices.refresh(index=indexer.search_index)
     return results
 
 @pytest.fixture()
@@ -1374,14 +1466,14 @@ def db_oaischema(app, db):
 from invenio_search import current_search_client
 @pytest.fixture()
 def search_index(app):
-    current_search_client.indices.delete(index='test-*', ignore=[400, 404])
     with open("tests/mock_module/mapping/os-v2/authors/test_authors.json","r") as f:
         mapping = json.load(f)
-    with app.test_request_context():
-        current_search_client.indices.create(app.config["WEKO_AUTHORS_SEARCH_INDEX_NAME"],body=mapping)
-
-
-    yield current_search_client
+    index = app.config["WEKO_AUTHORS_SEARCH_INDEX_NAME"]
+    try:
+        current_search_client.indices.create(index, body=mapping)
+        yield current_search_client
+    finally:
+        current_search_client.indices.delete(index=index, ignore=[404])
 
 
 @pytest.fixture()

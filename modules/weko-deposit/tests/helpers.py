@@ -742,8 +742,9 @@ def create_record_with_pdf(rec_uuid, recid):
     }
     record = WekoRecord.create(record_data, id_=rec_uuid)
     item = ItemsMetadata.create(item_metadata,id_=rec_uuid)
-    bucket = Bucket.create()
-    RecordsBuckets.create(record=record.model, bucket=bucket)
+    bucket = record.files.bucket
+    record['_buckets'] = {'deposit': str(bucket.id)}
+    record.commit()
     
     # mini size file
     mini_filepath = "tests/data/test_files/test_file_82K.pdf"
