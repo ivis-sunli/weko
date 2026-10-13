@@ -88,6 +88,7 @@ from invenio_search import (
 from invenio_search_ui import InvenioSearchUI
 from invenio_stats import InvenioStats
 
+from sqlalchemy.engine.url import make_url
 from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 from simplekv.memory.redisstore import RedisStore
 from weko_admin.models import AdminLangSettings
@@ -116,6 +117,19 @@ from werkzeug.local import LocalProxy
 from .helpers import create_record, json_data, fill_oauth2_headers
 
 
+@pytest.fixture(scope='session')
+def database_uri():
+    """Own a database for this test session, including failure cleanup."""
+    url = make_url(os.environ['SQLALCHEMY_DATABASE_URI'])
+    url = url.set(database='weko_index_tree_test_' + uuid.uuid4().hex)
+    uri = url.render_as_string(hide_password=False)
+    create_database(uri)
+    try:
+        yield uri
+    finally:
+        drop_database(uri)
+
+
 @pytest.fixture()
 def instance_path():
     """Temporary instance path."""
@@ -125,8 +139,9 @@ def instance_path():
 
 
 @pytest.fixture()
-def base_app(instance_path):
+def base_app(instance_path, database_uri):
     """Flask application fixture."""
+    search_prefix = 'test-index-tree-' + uuid.uuid4().hex + '-'
     app_ = Flask('testapp', instance_path=instance_path,static_folder=join(instance_path, "static"))
     app_.config.update(
         ACCOUNTS_JWT_ENABLE=False,
@@ -142,7 +157,7 @@ def base_app(instance_path):
         CACHE_REDIS_URL=os.environ.get("CACHE_REDIS_URL", "redis://redis:6379/0"),
         CACHE_TYPE="redis",
         CACHE_REDIS_DB='0',
-        CACHE_REDIS_HOST="redis",
+        CACHE_REDIS_HOST=os.environ.get("CACHE_REDIS_HOST", "redis"),
         WEKO_INDEX_TREE_STATE_PREFIX="index_tree_expand_state",
         REDIS_PORT='6379',
         DEPOSIT_DEFAULT_JSONSCHEMA=DEPOSIT_DEFAULT_JSONSCHEMA,
@@ -152,8 +167,7 @@ def base_app(instance_path):
         INDEXER_DEFAULT_INDEX="weko-item-v1.0.0",
         INDEX_IMG='indextree/36466818-image.jpg',
         INDEXER_MQ_QUEUE = Queue("indexer", exchange=Exchange("indexer", type="direct"), routing_key="indexer",queue_arguments={"x-queue-type":"quorum"}),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_uri,
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #     'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
         SEARCH_OPENSEARCH_HOSTS=os.environ.get(
@@ -177,7 +191,7 @@ def base_app(instance_path):
         # SEARCH_UI_SEARCH_INDEX=SEARCH_UI_SEARCH_INDEX,
         SEARCH_UI_SEARCH_INDEX="weko",
         # SEARCH_OPENSEARCH_HOSTS=os.environ.get("INVENIO_ELASTICSEARCH_HOST"),
-        SEARCH_INDEX_PREFIX="{}-".format('test'),
+        SEARCH_INDEX_PREFIX=search_prefix,
         # SEARCH_CLIENT_CONFIG={"http_auth":(os.environ['INVENIO_OPENSEARCH_USER'],os.environ['INVENIO_OPENSEARCH_PASS']),"use_ssl":True, "verify_certs":False},
         SEARCH_CLIENT_CONFIG={"http_auth":(os.environ.get('INVENIO_OPENSEARCH_USER', 'invenio'),os.environ.get('INVENIO_OPENSEARCH_PASS', 'openpass123!')),"use_ssl":True, "verify_certs":False},
         OAISERVER_ID_PREFIX="oai:inveniosoftware.org:recid/",
@@ -393,7 +407,7 @@ def base_app(instance_path):
                 search_class=RecordsSearch,
                 # search_index="test-weko",
                 # search_index=SEARCH_UI_SEARCH_INDEX,
-                search_index="tenant1",
+                search_index="weko",
                 search_type='item-v1.0.0',
                 search_factory_imp='weko_search_ui.query.weko_search_factory',
                 # record_class='',
@@ -519,19 +533,28 @@ def base_app(instance_path):
 def app(base_app):
     """Flask application fixture."""
     with base_app.app_context():
-        yield base_app
+        redis = RedisConnection().connection(db=base_app.config['CACHE_REDIS_DB'])
+        existing_keys = set(redis.scan_iter())
+        try:
+            yield base_app
+        finally:
+            owned_keys = set(redis.scan_iter()) - existing_keys
+            if owned_keys:
+                redis.delete(*owned_keys)
+            redis.close()
 
 
 @pytest.fixture()
 def db(app):
     """Get setup database."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
-    drop_alembic_version_table()
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.drop_all()
+        drop_alembic_version_table()
+        db_.engine.dispose()
 
 @pytest.fixture()
 def without_session_remove():
@@ -1035,29 +1058,21 @@ def open_search(app):
 
     search = LocalProxy(lambda: app.extensions["invenio-search"])
 
+    index = app.config["SEARCH_INDEX_PREFIX"] + app.config["INDEXER_DEFAULT_INDEX"]
+    alias = app.config["SEARCH_INDEX_PREFIX"] + "weko"
     try:
-        search.client.indices.create(app.config["INDEXER_DEFAULT_INDEX"],body=mapping)
-        search.client.indices.put_alias(index=app.config["INDEXER_DEFAULT_INDEX"], name="test-weko")
-    except:
-        search.client.indices.create("test-weko-items",body=mapping)
-        search.client.indices.put_alias(index="test-weko-items", name="test-weko")
-
-    try:
+        search.client.indices.create(index, body=mapping)
+        search.client.indices.put_alias(index=index, name=alias)
         yield search
     finally:
-        try:
-            search.client.indices.delete_alias(index=app.config["INDEXER_DEFAULT_INDEX"], name="test-weko")
-            search.client.indices.delete(index=app.config["INDEXER_DEFAULT_INDEX"], ignore=[400, 404])
-        except:
-            search.client.indices.delete_alias(index="test-weko-items", name="test-weko")
-            search.client.indices.delete(index="test-weko-items", ignore=[400, 404])
+        search.client.indices.delete(index=index, ignore=[404])
 
 
 @pytest.fixture()
 def search_index(app, open_search, db_records):
 
     for depid, recid, parent, doi, record, item in db_records:
-        open_search.client.index(index='test-weko-item-v1.0.0', id=record.id, body=record,refresh='true')
+        open_search.client.index(index=app.config["SEARCH_INDEX_PREFIX"] + app.config["INDEXER_DEFAULT_INDEX"], id=record.id, body=record,refresh='true')
 
     yield open_search
 
