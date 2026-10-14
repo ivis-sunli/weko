@@ -83,8 +83,13 @@ from kombu import Exchange, Queue
 from opensearchpy import OpenSearch
 from os.path import join
 from io import BytesIO
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Mapper, Session
 from sqlalchemy.sql import func
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy_continuum import versioning_manager
+from sqlalchemy_utils.functions import create_database, drop_database
+from sqlalchemy.engine.url import make_url
 from tests.helpers import fill_oauth2_headers
 from unittest.mock import patch
 
@@ -182,15 +187,59 @@ def instance_path():
     shutil.rmtree(path)
 
 
+@pytest.fixture(scope="session")
+def isolated_database_uri():
+    uri = make_url(os.environ['SQLALCHEMY_DATABASE_URI'])
+    uri = uri.set(database='weko_records_ui_test_' + uuid.uuid4().hex)
+    value = uri.render_as_string(hide_password=False)
+    create_database(value)
+    try:
+        yield value
+    finally:
+        drop_database(value)
+
+
 @pytest.fixture()
-@patch.dict('os.environ', {'INVENIO_OPENSEARCH_USER': 'invenio', 'INVENIO_OPENSEARCH_PASS': 'openpass123!'})
-def base_app(instance_path):
+def versioning_listeners():
+    """Release only the global versioning listeners installed by this app.
+
+    InvenioDB calls make_versioned for every application. Class-level
+    listeners accumulate across applications unless their owner removes them.
+    Keep the model/version mappings and real versioning behavior intact.
+    """
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
+@pytest.fixture()
+def base_app(instance_path, isolated_database_uri, versioning_listeners):
     """Flask application fixture."""
     app_ = Flask(
         "testapp",
         instance_path=instance_path,
         static_folder=join(instance_path, "static"),
     )
+    resource_prefix = "weko-records-ui-test-" + uuid.uuid4().hex
     app_.url_map.converters["pid"] = PIDConverter
     WEKO_INDEX_TREE_REST_ENDPOINTS = copy.deepcopy(_WEKO_INDEX_TREE_REST_ENDPOINTS)
     WEKO_INDEX_TREE_REST_ENDPOINTS["tid"]["index_route"] = "/tree/index/<int:index_id>"
@@ -211,7 +260,8 @@ def base_app(instance_path):
         CELERY_RESULT_BACKEND="cache",
         CACHE_REDIS_URL=os.environ.get("CACHE_REDIS_URL", "redis://redis:6379/0"),
         CACHE_REDIS_DB=0,
-        CACHE_REDIS_HOST="redis",
+        COLLECT_STORAGE="tests.asset_storage",
+        CACHE_REDIS_HOST=os.environ.get("CACHE_REDIS_HOST", "redis"),
         REDIS_PORT="6379",
         JSONSCHEMAS_URL_SCHEME="http",
         SECRET_KEY="CHANGE_ME",
@@ -219,8 +269,7 @@ def base_app(instance_path):
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #     "SQLALCHEMY_DATABASE_URI", "sqlite:///test.db"
         # ),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                           'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=isolated_database_uri,
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
         SQLALCHEMY_ECHO=False,
         TESTING=True,
@@ -232,7 +281,7 @@ def base_app(instance_path):
         OAUTHLIB_INSECURE_TRANSPORT=True,
         OAUTH2_CACHE_TYPE="simple",
         ACCOUNTS_JWT_ENABLE=False,
-        INDEXER_DEFAULT_INDEX="{}-weko-item-v1.0.0".format("test"),
+        INDEXER_DEFAULT_INDEX=resource_prefix + "-weko-item-v1.0.0",
         INDEXER_FILE_DOC_TYPE="content",
         WEKO_BUCKET_QUOTA_SIZE=WEKO_BUCKET_QUOTA_SIZE,
         WEKO_MAX_FILE_SIZE=WEKO_BUCKET_QUOTA_SIZE,
@@ -252,7 +301,7 @@ def base_app(instance_path):
         SEARCH_OPENSEARCH_HOSTS=os.environ.get(
                     'SEARCH_OPENSEARCH_HOSTS', 'opensearch'),
         SEARCH_CLIENT_CONFIG={"http_auth":(os.environ['INVENIO_OPENSEARCH_USER'],os.environ['INVENIO_OPENSEARCH_PASS']),"use_ssl":True, "verify_certs":False},
-        SEARCH_INDEX_PREFIX="test-",
+        SEARCH_INDEX_PREFIX="",
         WEKO_SCHEMA_JPCOAR_V1_SCHEMA_NAME=WEKO_SCHEMA_JPCOAR_V1_SCHEMA_NAME,
         WEKO_SCHEMA_DDI_SCHEMA_NAME=WEKO_SCHEMA_DDI_SCHEMA_NAME,
         RECORDS_UI_ENDPOINTS=RECORDS_UI_ENDPOINTS,
@@ -295,7 +344,7 @@ def base_app(instance_path):
         WEKO_WORKFLOW_DATE_FORMAT = WEKO_WORKFLOW_DATE_FORMAT,
         WEKO_RECORDS_UI_MAIL_TEMPLATE_SECRET_GENRE_ID = 1,
         MAIL_SUPPRESS_SEND=True,
-        SEARCH_UI_SEARCH_INDEX="test-weko",
+        SEARCH_UI_SEARCH_INDEX=resource_prefix + "-weko",
         FILES_REST_ROLES_ENV = [
             'INVENIO_ROLE_SYSTEM',
             'INVENIO_ROLE_REPOSITORY',
@@ -380,33 +429,28 @@ def app(base_app):
 
 @pytest.fixture()
 def search_index(app):
-    current_search_client.indices.delete(index='test-*')
-    with open("tests/data/mappings/item-v1.0.0.json","r") as f:
+    search_client = current_search_client._get_current_object()
+    index = app.config["INDEXER_DEFAULT_INDEX"]
+    with open("tests/data/mappings/item-v1.0.0.json", "r") as f:
         mapping = json.load(f)
     try:
-        current_search_client.indices.create(app.config["INDEXER_DEFAULT_INDEX"],body=mapping)
-        current_search_client.indices.put_alias(index=app.config["INDEXER_DEFAULT_INDEX"], name="test-weko")
-    except:
-        current_search_client.indices.create("test-weko-items",body=mapping)
-        current_search_client.indices.put_alias(index="test-weko-items", name="test-weko")
-    # print(current_search_client.indices.get_alias())
-
-    try:
-        yield current_search_client
+        search_client.indices.create(index, body=mapping)
+        search_client.indices.put_alias(
+            index=index, name=app.config["SEARCH_UI_SEARCH_INDEX"])
+        yield search_client
     finally:
-        current_search_client.indices.delete(index='test-*')
+        search_client.indices.delete(index=index, ignore=[404])
 
 
 @pytest.yield_fixture()
 def db(app):
-    """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
-    # drop_database(str(db_.engine.url))
+    """Database fixture, restricted to the session-owned test database."""
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.drop_all()
 
 
 @pytest.yield_fixture()
@@ -414,6 +458,26 @@ def client(app):
     """Get test client."""
     with app.test_client() as client:
         yield client
+
+
+@pytest.fixture()
+def request_context(app):
+    """Provide the HTTP context required by send_file in direct view calls."""
+    with app.test_request_context():
+        yield
+
+
+@pytest.fixture()
+def request_client(app):
+    """Give each API request its own locale and authenticated-user cache."""
+    from flask.testing import FlaskClient
+
+    class RequestClient(FlaskClient):
+        def open(self, *args, **kwargs):
+            with self.application.app_context():
+                return super().open(*args, **kwargs)
+
+    return RequestClient(app, app.response_class)
 
 
 @pytest.fixture()
@@ -639,6 +703,35 @@ def location(app, db):
     yield loc
 
     shutil.rmtree(tmppath)
+
+@pytest.fixture()
+def author_identifier_settings(db):
+    """Populate identifier schemes required by the existing import dataset."""
+    from weko_authors.models import AuthorsPrefixSettings, AuthorsAffiliationSettings
+
+    db.session.add_all([
+        AuthorsPrefixSettings(name="WEKO", scheme="WEKO"),
+        AuthorsPrefixSettings(name="ORCID", scheme="ORCID", url="https://orcid.org/##"),
+        AuthorsPrefixSettings(name="CiNii", scheme="CiNii", url="https://ci.nii.ac.jp/author/##"),
+        AuthorsPrefixSettings(name="KAKEN2", scheme="KAKEN2", url="https://nrid.nii.ac.jp/nrid/##"),
+        AuthorsAffiliationSettings(name="ISNI", scheme="ISNI", url="http://www.isni.org/isni/##"),
+    ])
+    db.session.commit()
+
+
+@pytest.fixture()
+def version_property(db):
+    """Restore the Version property from this module's existing schema asset."""
+    from weko_records.config import WEKO_ITEMPROPS_SCHEMAID_VERSION
+    from weko_records.models import ItemTypeProperty
+
+    with open("tests/data/itemtype_schema.json") as source:
+        schema = json.load(source)["properties"]["item_1617349808926"]
+    prop = ItemTypeProperty(
+        id=WEKO_ITEMPROPS_SCHEMAID_VERSION, name="Version", schema=schema)
+    db.session.add(prop)
+    db.session.commit()
+    return prop
 
 
 @pytest.fixture()
@@ -5781,6 +5874,19 @@ def make_record_need_restricted_access(app, db, workflows, users):
     record_data_list = []
     with open('tests/data/need_restricted_access_records_metadata.json', 'r') as f:
         record_data_list = json.load(f)
+
+    # Legacy data used numeric roles; the current accounts model uses name IDs.
+    role_ids = {
+        "1": Role.query.filter_by(name="System Administrator").one().id,
+        "2": Role.query.filter_by(name="Repository Administrator").one().id,
+        "3": Role.query.filter_by(name="Contributor").one().id,
+    }
+    for record_data in record_data_list:
+        for metadata in record_data.values():
+            if isinstance(metadata, dict) and metadata.get("attribute_type") == "file":
+                for file_data in metadata.get("attribute_value_mlt", []):
+                    for provision in file_data.get("provide", []):
+                        provision["role"] = role_ids.get(provision["role"], provision["role"])
 
     # 1. Not restricted access.
     rec_id11 = 11
