@@ -1316,7 +1316,7 @@ def test_replace_file_bucket_local(app, db, users, client, records, mocker):
         )
         assert res.status_code == 200
 
-def test_replace_file_bucket_S3(app, db, users, client, records, mocker):
+def test_replace_file_bucket_S3(app, db, users, client, records, mocker, author_identifier_settings):
 
     pid = PersistentIdentifier.query.filter_by(
         pid_type="recid", pid_value='1'
@@ -1324,6 +1324,15 @@ def test_replace_file_bucket_S3(app, db, users, client, records, mocker):
     records_buckets = RecordsBuckets.query.filter_by(
         record_id=pid.object_uuid).first()
     file_obj = ObjectVersion.get(bucket=records_buckets.bucket_id, key='helloworld.pdf')
+    assert file_obj is not None
+    record_uuid = pid.object_uuid
+
+    # record.files also creates a bucket in the shared fixture. Retain one
+    # authoritative association for this record before replacing its bucket.
+    for association in RecordsBuckets.query.filter_by(record_id=pid.object_uuid).all():
+        if association.bucket_id != records_buckets.bucket_id:
+            db.session.delete(association)
+    db.session.commit()
 
     # テスト用のデータを用意
     test_data = b'Hello, World!' # バイナリデータ
@@ -1331,6 +1340,14 @@ def test_replace_file_bucket_S3(app, db, users, client, records, mocker):
     virtual_file = BytesIO(test_data)
     # FileStorageオブジェクトを作成
     file = FileStorage(stream=virtual_file, filename='helloworld.pdf', content_type='application/pdf')
+
+    # A replacement upload owns a new bucket and file instance.
+    replacement_bucket = Bucket.create()
+    replacement_obj = ObjectVersion.create(
+        bucket=replacement_bucket.id, key='helloworld.pdf', stream=BytesIO(test_data))
+    db.session.commit()
+    replacement_bucket_id = replacement_bucket.id
+    replacement_version_id = replacement_obj.version_id
 
     url = url_for("weko_records_ui.replace_file")
 
@@ -1355,9 +1372,17 @@ def test_replace_file_bucket_S3(app, db, users, client, records, mocker):
                 'file_name': 'helloworld.pdf',
                 'file_size': 100,
                 'file_checksum': '86266081366d3c950c1cb31fbd9e1c38e4834fa52b568753ce28c87bc31252cd',
-                'new_bucket_id': records_buckets.bucket_id,
-                'new_version_id': file_obj.version_id,
+                'new_bucket_id': replacement_bucket_id,
+                'new_version_id': replacement_version_id,
                 'file': None,
             },
         )
         assert res.status_code == 200
+        db.session.expire_all()
+        association = RecordsBuckets.query.filter_by(record_id=record_uuid).one()
+        assert association.bucket_id == replacement_bucket_id
+        replaced = ObjectVersion.get(bucket=replacement_bucket_id, key='helloworld.pdf')
+        stored = FileInstance.get(replaced.file_id)
+        assert stored.uri.startswith('s3://test/')
+        assert stored.size == 100
+        assert stored.checksum == 'sha256:86266081366d3c950c1cb31fbd9e1c38e4834fa52b568753ce28c87bc31252cd'

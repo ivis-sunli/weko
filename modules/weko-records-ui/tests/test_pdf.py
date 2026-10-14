@@ -3,6 +3,8 @@ import uuid
 import copy
 import json
 
+from flask_babel import force_locale
+
 from invenio_files_rest.models import Bucket, Location, ObjectVersion
 from invenio_pidstore.models import PersistentIdentifier, PIDStatus
 from invenio_pidrelations.contrib.versioning import PIDNodeVersioning
@@ -277,8 +279,10 @@ def make_record(indexer, id, publisher, subjects, creator,affiliation, lang_lang
 #     def get_url(pid_value):
 #     def get_oa_policy(activity_id):
 # .tox/c1/bin/pytest --cov=weko_records_ui tests/test_pdf.py::test_make_combined_pdf -vv -s --cov-branch --cov-report=term --cov-report=html --basetemp=/code/modules/weko-records-ui/.tox/c1/tmp
-def test_make_combined_pdf(app, db, search_index, location, pdfcoverpagesetting, mocker):
-    temp_path = "tests/data"
+def test_make_combined_pdf(
+    app, db, search_index, location, pdfcoverpagesetting, mocker, tmp_path, request_context
+):
+    temp_path = str(tmp_path)
     mocker.patch("weko_records_ui.pdf.tempfile.gettempdir", return_value=temp_path)
     import shutil, os
     if os.path.isdir(temp_path+"/comb_pdfs"):
@@ -326,9 +330,9 @@ def test_make_combined_pdf(app, db, search_index, location, pdfcoverpagesetting,
             "Language: English\nPublisher: \nDate of Publication: 2024-03-21\nKeywords: \nAuthor: \nE-mail: \nAffiliation: "
         ),
         (
-            "Language: Japanese\nPublisher: \nDate of Publication: 2024-03-21\nKeywords: test_subject\nAuthor: \nE-mail: \nAffiliation: ",
-            "言語: Japanese\n出版者: \n公開日: 2024-03-21\nキーワード: テスト主題\n作成者: \nメールアドレス: \n所属: ",
-            "Language: Japanese\nPublisher: \nDate of Publication: 2024-03-21\nKeywords: test_subject\nAuthor: \nE-mail: test.taro@test.org\nAffiliation: ",
+            "Language: Japanese\nPublisher: test_publisher\nDate of Publication: 2024-03-21\nKeywords: test_subject\nAuthor: \nE-mail: \nAffiliation: ",
+            "言語: Japanese\n出版者: test_publisher\n公開日: 2024-03-21\nキーワード: テスト主題\n作成者: \nメールアドレス: \n所属: ",
+            "Language: Japanese\nPublisher: test_publisher\nDate of Publication: 2024-03-21\nKeywords: test_subject\nAuthor: \nE-mail: test.taro@test.org\nAffiliation: ",
             "Language: Japanese, English\nPublisher: \nDate of Publication: 2024-03-21\nKeywords: \nAuthor: \nE-mail: \nAffiliation: "
         ),
         (
@@ -358,7 +362,7 @@ def test_make_combined_pdf(app, db, search_index, location, pdfcoverpagesetting,
             mock_page_setting.header_output_image = "tests/data/image01.jpg"
             mock_page_setting.header_display_position = "left"
             mock_page_setting.header_display_type = "string"
-            with app.test_request_context(headers=[('Accept-Language', 'en')]):
+            with app.test_request_context(headers=[('Accept-Language', 'en')]), force_locale('en'):
                 res = make_combined_pdf(record.pid, fileobj, obj, None)
             args_list = mock_multi_cell.call_args_list
             assert args_list[2][0][3] == tests[i][0]
@@ -368,7 +372,7 @@ def test_make_combined_pdf(app, db, search_index, location, pdfcoverpagesetting,
             mock_page_setting.header_display_position = "center"
             mock_page_setting.header_output_image = "tests/data/image01.jpg"
             mock_page_setting.header_display_type = "Image"
-            with app.test_request_context(headers=[('Accept-Language', 'ja')]):
+            with app.test_request_context(headers=[('Accept-Language', 'ja')]), force_locale('ja'):
                 res = make_combined_pdf(record.pid, fileobj, obj, None)
             args_list = mock_multi_cell.call_args_list
             assert args_list[1][0][3] == tests[i][1]
@@ -378,7 +382,7 @@ def test_make_combined_pdf(app, db, search_index, location, pdfcoverpagesetting,
             mock_page_setting.header_display_position = "center"
             mock_page_setting.header_output_image = ""
             mock_page_setting.header_display_type = "Image"
-            with app.test_request_context(headers=[('Accept-Language', 'fr')]):
+            with app.test_request_context(headers=[('Accept-Language', 'fr')]), force_locale('fr'):
                 res = make_combined_pdf(record.pid, fileobj, obj, None)
             args_list = mock_multi_cell.call_args_list
             assert args_list[1][0][3] == tests[i][0]

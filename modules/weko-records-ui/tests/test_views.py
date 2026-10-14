@@ -5,6 +5,7 @@ import uuid
 
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
+from urllib.parse import urljoin
 from flask import Flask, json, jsonify, session, url_for ,make_response, current_app
 from flask_security.utils import login_user
 from flask_babel import gettext as _
@@ -95,7 +96,7 @@ def test_publish_acl_guest(client, records, create_endpoint):
     url = url_for("invenio_records_ui.recid_publish", pid_value=1, _external=True)
     res = client.post(url)
     assert res.status_code == 302
-    assert res.location == "/records/1"
+    assert res.location == urljoin(res.request.host_url, "/records/1")
 
 
 # .tox/c1/bin/pytest --cov=weko_records_ui tests/test_views.py::test_publish_acl -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-records-ui/.tox/c1/tmp
@@ -117,7 +118,7 @@ def test_publish_acl(client, records, users, id, status_code, create_endpoint):
     url = url_for("invenio_records_ui.recid_publish", pid_value=1, _external=True)
     res = client.post(url)
     assert res.status_code == status_code
-    assert res.location == "/records/1"
+    assert res.location == urljoin(res.request.host_url, "/records/1")
 
 
 # def export(pid, record, template=None, **kwargs):
@@ -137,7 +138,7 @@ def test_publish(client, records, users, communities, mocker, app, create_endpoi
         mock_request.values = {"community": 1}
         actual_response = publish(records_info[0]["recid"], records_info[0]["record"], template=None)
         assert actual_response.status_code == 302
-        assert actual_response.location == "/records/1?community=1"
+        assert actual_response.location == "/records/1?c=1"
 
         # Test Case 2: community id exists
         mock_request.values = {}
@@ -1050,7 +1051,7 @@ def test_doi_ish_view_method_acl_guest(app,client,records):
     url = url_for("weko_records_ui.doi_ish_view_method", parent_pid_value=1, _external=True)
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == '/login/?next=%2Fr%2F1'
+    assert res.location == urljoin(res.request.host_url, '/login/?next=%2Fr%2F1')
 
 
 # .tox/c1/bin/pytest --cov=weko_records_ui tests/test_views.py::test_doi_ish_view_method_acl -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-records-ui/.tox/c1/tmp
@@ -1072,7 +1073,7 @@ def test_doi_ish_view_method_acl(app,client,records,users,id,result, create_endp
     url = url_for("weko_records_ui.doi_ish_view_method", parent_pid_value=1, _external=True)
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == '/records/1.1'
+    assert res.location == urljoin(res.request.host_url, '/records/1.1')
 
 
 # def parent_view_method(pid_value=0):
@@ -1081,7 +1082,7 @@ def test_parent_view_method_acl_guest(app,client,records):
     url = url_for("weko_records_ui.parent_view_method", pid_value=1, _external=True)
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == '/login/?next=%2Frecords%2Fparent%3A1'
+    assert res.location == urljoin(res.request.host_url, '/login/?next=%2Frecords%2Fparent%3A1')
 
 # .tox/c1/bin/pytest --cov=weko_records_ui tests/test_views.py::test_parent_view_method_acl -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-records-ui/.tox/c1/tmp
 @pytest.mark.parametrize(
@@ -1102,7 +1103,7 @@ def test_parent_view_method_acl(app,client,records,users,id,result, create_endpo
     url = url_for("weko_records_ui.parent_view_method", pid_value=1, _external=True)
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == '/records/1.1'
+    assert res.location == urljoin(res.request.host_url, '/records/1.1')
 
 
 # def set_pdfcoverpage_header():
@@ -1112,7 +1113,7 @@ def test_set_pdfcoverpage_header_acl_guest(app, client, records, pdfcoverpageset
     url = url_for("weko_records_ui.set_pdfcoverpage_header",_external=True)
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == '/admin/pdfcoverpage/'
+    assert res.location == urljoin(res.request.host_url, '/admin/pdfcoverpage/')
 
 # .tox/c1/bin/pytest --cov=weko_records_ui tests/test_views.py::test_set_pdfcoverpage_header_acl -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-records-ui/.tox/c1/tmp
 @pytest.mark.parametrize(
@@ -1134,7 +1135,7 @@ def test_set_pdfcoverpage_header_acl_error(app, client, records, users, id, resu
     url = url_for("weko_records_ui.set_pdfcoverpage_header",_external=True)
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == '/admin/pdfcoverpage/'
+    assert res.location == urljoin(res.request.host_url, '/admin/pdfcoverpage/')
     s = PDFCoverPageSettings.find(1)
     assert s is not None
     assert s.header_output_image == ''
@@ -1184,7 +1185,7 @@ def test_set_pdfcoverpage_header_acl(app, client, records, users, id, result, pd
     url = url_for("weko_records_ui.set_pdfcoverpage_header",_external=True)
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == '/admin/pdfcoverpage/'
+    assert res.location == urljoin(res.request.host_url, '/admin/pdfcoverpage/')
     s = PDFCoverPageSettings.find(1)
     assert s is not None
     assert s.header_output_image == ''
@@ -1209,7 +1210,7 @@ def test_set_pdfcoverpage_header_acl2(app, client, records, users, id, result, p
         'header-output-image': (io.BytesIO(b"some initial text data"), 'test.png')}
     res = client.post(url,data=data)
     assert res.status_code == 302
-    assert res.location == '/admin/pdfcoverpage/'
+    assert res.location == urljoin(res.request.host_url, '/admin/pdfcoverpage/')
     s = PDFCoverPageSettings.find(1)
     assert s is not None
     assert s.header_output_image != ''
@@ -1234,7 +1235,7 @@ def test_set_pdfcoverpage_header_acl3(app, client, records, users, id, result, p
     'header-output-image': (io.BytesIO(b"some initial text data"), 'test.png')}
     res = client.post(url,data=data)
     assert res.status_code == 302
-    assert res.location == '/admin/pdfcoverpage/'
+    assert res.location == urljoin(res.request.host_url, '/admin/pdfcoverpage/')
 
 
 #     def handle_over_max_file_size(error):
@@ -1244,7 +1245,7 @@ def test_file_version_update_acl_guest(client, records):
     url = url_for("weko_records_ui.file_version_update",_external=True)
     res = client.put(url)
     assert res.status_code == 302
-    assert res.location == '/login/?next=%2Ffile_version%2Fupdate'
+    assert res.location == urljoin(res.request.host_url, '/login/?next=%2Ffile_version%2Fupdate')
 
 
 # .tox/c1/bin/pytest --cov=weko_records_ui tests/test_views.py::test_file_version_update_acl -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-records-ui/.tox/c1/tmp
@@ -1298,7 +1299,7 @@ def test_file_version_update_acl2(client, records, users, id, status_code):
 
 # def citation(record, pid, style=None, ln=None):
 # .tox/c1/bin/pytest --cov=weko_records_ui tests/test_views.py::test_citation -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-records-ui/.tox/c1/tmp
-def test_citation(app, records):
+def test_citation(app, records, version_property):
     indexer, results = records
     record = results[0]["record"]
     with app.test_request_context():

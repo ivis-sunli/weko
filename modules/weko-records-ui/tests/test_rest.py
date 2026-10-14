@@ -289,8 +289,11 @@ def test_GetFileTerms_get_v1_5(app, client, db, make_record_need_restricted_acce
     assert res.status_code == 304
 
 # .tox/c1/bin/pytest --cov=weko_records_ui tests/test_rest.py::test_FileApplication_post_v1 -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-records-ui/.tox/c1/tmp
-def test_FileApplication_post_v1(app, client, db, workflows_restricted, make_record_need_restricted_access, oauth_headers, users):
+def test_FileApplication_post_v1(
+    app, request_client, db, workflows_restricted, make_record_need_restricted_access, oauth_headers, users
+):
     """Test GetFileTerms.post_v1 method."""
+    client = request_client
 
     version = 'v1'
     invalid_version = 'v0'
@@ -441,7 +444,7 @@ def test_FileApplication_post_v1(app, client, db, workflows_restricted, make_rec
         json.loads(res.get_data())
     except:
         assert False
-    assert res.status_code == 404
+    assert res.status_code == 404, res.get_json()
 
     # pid not found : 404 error
     pid_value = 100
