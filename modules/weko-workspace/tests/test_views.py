@@ -1532,8 +1532,15 @@ def test_get_auto_fill_record_data_arXivapi(db,users, workflow,client_api, clien
 
     mocker.patch("weko_workspace.views.session",session)
     url = url_for("weko_workspace_api.get_auto_fill_record_data_arXivapi")
-    res = client.post(url,
-                data=json.dumps(data),
-                content_type='application/json')
+    response = Mock(status_code=200, text='<feed><id>id</id></feed>')
+    with patch('weko_workspace.api.requests.get', return_value=response) as mock_get:
+        res = client.post(
+            url,
+            data=json.dumps(data),
+            content_type='application/json')
+        mock_get.assert_called_once()
+        assert mock_get.call_args[0] == (
+            'https://export.arxiv.org/api/query?search_query=doi:test',
+        )
     assert res.status_code == 200
     assert json.loads(res.data) == {"result":"","items":"","error":"'entry'"}

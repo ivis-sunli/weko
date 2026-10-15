@@ -8,6 +8,19 @@ from requests.models import Response
 from weko_workspace.api import JamasURL, CiNiiURL, JALCURL, DATACITEURL, arXivURL
 
 
+@pytest.fixture(autouse=True)
+def restore_api_proxies():
+    """Keep constructor proxy mutations local to each existing API test."""
+    classes = (JamasURL, CiNiiURL, JALCURL, DATACITEURL, arXivURL)
+    proxies = {cls: dict(cls._proxy) for cls in classes}
+    try:
+        yield
+    finally:
+        for cls, original in proxies.items():
+            cls._proxy.clear()
+            cls._proxy.update(original)
+
+
 # class JamasURL:
 class TestJamasURL:
 #     def __init__(self, doi, timeout=None, http_proxy=None, https_proxy=None):
