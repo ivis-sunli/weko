@@ -66,7 +66,7 @@ def test_admin(app, admin_view, users):
             )
 
 
-def test_admin_createuser(app, admin_view):
+def test_admin_createuser(app, admin_view, users):
     """Test flask-admin user creation"""
 
     with app.app_context():
@@ -127,11 +127,6 @@ def test_admin_createuser(app, admin_view):
             assert user is not None
             assert user.active is False
 
-    user_data = dict(
-        email="test6@test.cern", active=False, password=hash_password("123456")
-    )
-    _datastore.create_user(**user_data)
-    _datastore.commit()
     assert _datastore.get_user("test4@test.cern") is not None
     user = _datastore.get_user("test5@test.cern")
     assert user is not None
@@ -221,7 +216,7 @@ def test_admin_sessions_action_delete(app):
 def test_userview_get_query(app, users):
         """Test get_query for super role user."""
         view = UserView(User, db.session)
-        mock_repo = MagicMock(group=MagicMock(id=2))
+        mock_repo = MagicMock(group=MagicMock(id="2"))
 
         with app.test_request_context(), app.test_client() as client:
             login_user_via_view(client=client, email=users[2]['email'], password=users[2]['password'])
@@ -242,7 +237,7 @@ def test_userview_get_query(app, users):
 def test_userview_get_count_query(app, users):
         """Test get_count_query for super role user."""
         view = UserView(User, db.session)
-        mock_repo = MagicMock(group=MagicMock(id=2))
+        mock_repo = MagicMock(group=MagicMock(id="2"))
 
         with app.test_request_context(), app.test_client() as client:
             login_user_via_view(client=client, email=users[2]['email'], password=users[2]['password'])

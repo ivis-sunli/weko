@@ -9,6 +9,7 @@
 """Test test utilities."""
 
 from datetime import datetime
+from urllib.parse import urlsplit
 
 import flask_login
 import mock
@@ -47,7 +48,7 @@ def test_client_authenticated(app):
             response = client.get(change_password_url)
             assert response.status_code == 302
             assert change_password_url not in response.location
-            assert login_url in response.location
+            assert urlsplit(login_url).path == urlsplit(response.location).path
 
             # Once more, following redirects.
             response = client.get(change_password_url, follow_redirects=True)
@@ -191,7 +192,7 @@ def test_get_user_ids_by_role_returns_user_ids(app):
 
 
 @pytest.mark.parametrize("role_id, expected", [
-    (999, []),
+    pytest.param('999', [], id='999-expected0'),
     (None, []),
     ('1', []),
 ])

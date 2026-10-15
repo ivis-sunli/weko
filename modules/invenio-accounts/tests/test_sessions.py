@@ -306,12 +306,10 @@ def test_add_session(app):
             assert query.count() == 0
 
             # Create a test request context
-            with app.test_request_context():
+            with app.test_request_context(method="POST", data={'jao': '相うえおIdP'}):
                 session['_user_id'] = user.id
                 session.sid_s = 'test_sid_s'  # Mock session ID
-                # Mock request.get_json to return specific data
-                with patch('flask.request.get_json', return_value={'jao': '相うえおIdP'}):
-                    add_session(session)
+                add_session(session)
 
             query = db.session.query(SessionActivity)
             assert query.count() == 1
