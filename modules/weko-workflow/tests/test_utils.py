@@ -1137,8 +1137,8 @@ def test_prepare_edit_workflow(app, workflow, db_records,users,mocker, order_if)
                 type(pi).query = pi
                 pi.filter_by = MagicMock(return_value = pi)
                 pi.one_or_none = MagicMock(return_value = None)
-                recid = db_records[7][0]
-                deposit = db_records[7][6]
+                recid = db_records[8][0]
+                deposit = db_records[8][6]
                 result = prepare_edit_workflow(data,recid,deposit)
                 assert result.activity_id != None
         if order_if == 5:
@@ -1149,8 +1149,8 @@ def test_prepare_edit_workflow(app, workflow, db_records,users,mocker, order_if)
         elif order_if == 6:
             # mocker.patch("weko_workflow.utils.IdentifierHandle.get_pidstore")
             # with patch("weko_deposit.api.WekoRecord.get_record_by_pid", return_value=None):
-            recid = db_records[4][0]
-            deposit = db_records[4][6]
+            recid = db_records[3][0]
+            deposit = db_records[3][6]
             res = prepare_edit_workflow(data,recid,deposit)
             assert res.activity_id != None
 
@@ -1190,6 +1190,7 @@ def test_prepare_edit_workflow_existing_draft_pid_no_bucket(app, workflow, db_re
         mocker.patch("weko_workflow.utils.WekoDeposit.update")
         mocker.patch("weko_workflow.utils.WekoDeposit.commit")
         mocker.patch("weko_workflow.utils.WekoDeposit.publish")
+        merge_mock = mocker.patch("weko_workflow.utils.WekoDeposit.merge_data_to_record_without_version")
 
         mocker.patch("invenio_deposit.api.Deposit.files")
         create_bucket_mock = mocker.patch("invenio_files_rest.models.Bucket.create")
@@ -1207,10 +1208,10 @@ def test_prepare_edit_workflow_existing_draft_pid_no_bucket(app, workflow, db_re
         with patch("invenio_records_files.models.RecordsBuckets.create", side_effect=SQLAlchemyError("Test Exception")) as create_records_buckets_mock:
             with pytest.raises(SQLAlchemyError) as excinfo:
                 prepare_edit_workflow(data, draft_pid, deposit)
-
-                assert create_bucket_mock.called
-                assert create_records_buckets_mock.called
-                assert str(ex) == "Test Exception"
+            merge_mock.assert_called_once_with(draft_pid, True)
+            assert create_bucket_mock.called
+            assert create_records_buckets_mock.called
+            assert str(excinfo.value) == "Test Exception"
 
 # .tox/c1/bin/pytest --cov=weko_workflow tests/test_utils.py::test_prepare_edit_workflow_check_doi -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-workflow/.tox/c1/tmp
 def test_prepare_edit_workflow_check_doi(app, workflow, db_records, users, mocker):
@@ -1549,7 +1550,7 @@ def test_handle_finish_workflow(
 
 # .tox/c1/bin/pytest --cov=weko_workflow tests/test_utils.py::test_handle_finish_workflow2 -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-workflow/.tox/c1/tmp
 def test_handle_finish_workflow2(
-    workflow, db_records, item_type, user_activity_log_partition_table, mocker
+    workflow, db_records, item_type, db_itemtype2, user_activity_log_partition_table, mocker
 ):
     result = handle_finish_workflow(None, None, None)
     assert result == None
@@ -1583,7 +1584,7 @@ def test_handle_finish_workflow2(
     current_pid = db_records[1][0]
     recid = db_records[1][2]
     result = handle_finish_workflow(deposit,current_pid,None)
-    assert result == current_pid.object_uuid
+    assert result == db_records[2][0].object_uuid
 
     with patch('weko_deposit.pidstore.get_record_without_version', side_effect=Exception):
         result = handle_finish_workflow(deposit,current_pid,recid)
@@ -1592,7 +1593,7 @@ def test_handle_finish_workflow2(
 
 # .tox/c1/bin/pytest --cov=weko_workflow tests/test_utils.py::test_handle_finish_workflow_external_system -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-workflow/.tox/c1/tmp
 def test_handle_finish_workflow_external_system(
-    workflow, db_records, user_activity_log_partition_table, mocker
+    workflow, db_records, db_itemtype2, user_activity_log_partition_table, mocker
 ):
     record = WekoRecord.get_record_by_pid("1")
     deposit = WekoDeposit(record, record.model)
@@ -1600,7 +1601,7 @@ def test_handle_finish_workflow_external_system(
     mocker.patch("weko_workflow.utils.UpdateItem.publish")
     # mocker.patch("invenio_oaiserver.tasks.update_records_sets.delay")
     mocker.patch("weko_workflow.utils.WekoRecord.get_record_by_pid", return_value=record)
-    mocker.patch("weko_deposit.api.WekoDeposit.newversion", MagicMock())
+    mocker.patch("weko_deposit.api.WekoDeposit.newversion", return_value=db_records[2][6])
     mocker.patch("weko_workflow.utils.ItemReference.get_src_references", return_value=MagicMock())
 
     current_pid = PersistentIdentifier.get("recid", "1")
@@ -1824,10 +1825,13 @@ def test_get_record_by_root_ver(app, db_records):
     app.config.update(
         DEPOSIT_DEFAULT_STORAGE_CLASS="S",
     )
+    expected_bucket = db_records[0][2]["_bucket"]
     record, files = get_record_by_root_ver("1")
 
     assert files == []
-    assert record == {'_oai': {'id': 'oai:weko3.example.org:00000001', 'sets': ['1']}, 'path': ['1'], 'owner': 1, 'owners': [1], 'recid': '1', 'title': ['title'], 'pubdate': {'attribute_name': 'PubDate', 'attribute_value': '2022-08-20'}, '_buckets': {'deposit': '3e99cfca-098b-42ed-b8a0-20ddd09b3e02'}, '_deposit': {'id': '1', 'pid': {'type': 'depid', 'value': '1', 'revision_id': 0}, 'owner': 1, 'owners': [1], 'status': 'published', 'created_by': 1, 'owners_ext': {'email': 'wekosoftware@nii.ac.jp', 'username': '', 'displayname': ''}}, 'item_title': 'title', 'author_link': [], 'created_by': 1, 'item_type_id': '1', 'publish_date': '2022-08-20', 'publish_status': '0', 'weko_shared_ids': [], 'item_1617186331708': {'attribute_name': 'Title', 'attribute_value_mlt': [{'subitem_1551255647225': 'title', 'subitem_1551255648112': 'ja','subitem_stop/continue': 'Continue'}]}, "item_1617186819068": {"attribute_name": "Identifier Registration","attribute_value_mlt": [{"subitem_identifier_reg_text" :"test/0000000001","subitem_identifier_reg_type": "JaLC"}]}, 'item_1617258105262': {'attribute_name': 'Resource Type', 'attribute_value_mlt': [{'resourceuri': 'http://purl.org/coar/resource_type/c_5794', 'resourcetype': 'conference paper'}]},'item_1617605131499': {'attribute_name': 'File','attribute_type': 'file','attribute_value_mlt': [{'accessrole': 'open_access','date': [{'dateType': 'Available','dateValue': '2022-10-03'}],'displaytype': 'detail','filename': 'check_2022-03-10.tsv','filesize': [{'value': '460 ''B'}],'format': 'text/tab-separated-values','is_thumbnail': True,'licensetype': 'license_12','url': {'url': 'https://localhost/record/1/files/test.txt'},'version_id': '29dd361d-dc7f-49bc-b471-bdb5752afef5'}]},'item_1664947259584': {'attribute_name': 'サムネイル','attribute_value_mlt': [{'subitem_thumbnail': [{'thumbnail_label': 'test.png','thumbnail_url': '/api/files/29ad484d-4ed1-4caf-8b21-ab348ae7bf28/test.png?versionId=ecd5715e-4ca5-4e45-b93c-5089f52860a0'}]}]}, 'relation_version_is_last': True}
+    expected_record = {'_oai': {'id': 'oai:weko3.example.org:00000001', 'sets': ['1']}, 'path': ['1'], 'owner': 1, 'owners': [1], 'recid': '1', 'title': ['title'], 'pubdate': {'attribute_name': 'PubDate', 'attribute_value': '2022-08-20'}, '_buckets': {'deposit': '3e99cfca-098b-42ed-b8a0-20ddd09b3e02'}, '_deposit': {'id': '1', 'pid': {'type': 'depid', 'value': '1', 'revision_id': 0}, 'owner': 1, 'owners': [1], 'status': 'published', 'created_by': 1, 'owners_ext': {'email': 'wekosoftware@nii.ac.jp', 'username': '', 'displayname': ''}}, 'item_title': 'title', 'author_link': [], 'created_by': 1, 'item_type_id': '1', 'publish_date': '2022-08-20', 'publish_status': '0', 'weko_shared_ids': [], 'item_1617186331708': {'attribute_name': 'Title', 'attribute_value_mlt': [{'subitem_1551255647225': 'title', 'subitem_1551255648112': 'ja','subitem_stop/continue': 'Continue'}]}, "item_1617186819068": {"attribute_name": "Identifier Registration","attribute_value_mlt": [{"subitem_identifier_reg_text" :"test/0000000001","subitem_identifier_reg_type": "JaLC"}]}, 'item_1617258105262': {'attribute_name': 'Resource Type', 'attribute_value_mlt': [{'resourceuri': 'http://purl.org/coar/resource_type/c_5794', 'resourcetype': 'conference paper'}]},'item_1617605131499': {'attribute_name': 'File','attribute_type': 'file','attribute_value_mlt': [{'accessrole': 'open_access','date': [{'dateType': 'Available','dateValue': '2022-10-03'}],'displaytype': 'detail','filename': 'check_2022-03-10.tsv','filesize': [{'value': '460 ''B'}],'format': 'text/tab-separated-values','is_thumbnail': True,'licensetype': 'license_12','url': {'url': 'https://localhost/record/1/files/test.txt'},'version_id': '29dd361d-dc7f-49bc-b471-bdb5752afef5'}]},'item_1664947259584': {'attribute_name': 'サムネイル','attribute_value_mlt': [{'subitem_thumbnail': [{'thumbnail_label': 'test.png','thumbnail_url': '/api/files/29ad484d-4ed1-4caf-8b21-ab348ae7bf28/test.png?versionId=ecd5715e-4ca5-4e45-b93c-5089f52860a0'}]}]}, 'relation_version_is_last': True}
+    expected_record["_bucket"] = expected_bucket
+    assert record == expected_record
 
 
 # def get_disptype_and_ver_in_metainfo(metadata):
@@ -3757,7 +3761,7 @@ def test_get_activity_display_info(app,db, users, db_register_full_action, mocke
         with db.session.begin_nested():
             db.session.add(db_history1)
         test_steps = [
-            {"ActivityId":activity_id,"ActionId":1,"ActionName":"Start","ActionVersion":"1.0.0","ActionEndpoint":"begin_action", "Author":"user@test.org", "Status":"action_doing", "ActionOrder":1},
+            {"ActivityId":activity_id,"ActionId":1,"ActionName":"Start","ActionVersion":"1.0.0","ActionEndpoint":"begin_action", "Author":users[0]["email"], "Status":"action_doing", "ActionOrder":1},
             {"ActivityId":activity_id,"ActionId":3,"ActionName":"Item Registration","ActionVersion":"1.0.0","ActionEndpoint":"item_login", "Author":"", "Status":" ","ActionOrder":2},
             {"ActivityId":activity_id,"ActionId":5,"ActionName":"Item Link","ActionVersion":"1.0.0","ActionEndpoint":"item_link", "Author":"", "Status":" ","ActionOrder":3},
             {"ActivityId":activity_id,"ActionId":4,"ActionName":"Approval","ActionVersion":"1.0.0","ActionEndpoint":"approval","Author":"","Status":" ","ActionOrder":4}
@@ -3917,7 +3921,7 @@ def test___init_activity_detail_data_for_guest(app, db, users, db_register_full_
             enable_contributor=current_app.config[
                 'WEKO_WORKFLOW_ENABLE_CONTRIBUTOR'],
             out_put_report_title={'en': 'Output Registration', 'ja': '成果物'},
-            action_endpoint_key={},
+            action_endpoint_key=current_app.config["WEKO_ITEMS_UI_ACTION_ENDPOINT_KEY"],
             approval_email_key=[],
             step_item_login_url="weko_items_ui/iframe/item_edit.html",
             need_file=True,
@@ -5127,6 +5131,8 @@ def test_grant_access_rights_to_all_open_restricted_files(app ,db,users ):
 # def get_contributors(pid_value)
 # .tox/c1/bin/pytest --cov=weko_workflow tests/test_utils.py::test_get_contributors -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-workflow/.tox/c1/tmp
 def test_get_contributors(app, db, users_1, db_records_1):
+    user1_id = users_1[0]["id"]
+    user2_id = users_1[1]["id"]
     with app.test_request_context():
         login_user(users_1[0]["obj"])
         # 引数のpid_valueをfalseに設定する。
@@ -5134,15 +5140,15 @@ def test_get_contributors(app, db, users_1, db_records_1):
         assert actual == []
         # user_id_list_json値を設定
         # 引数のpid_valueをfalseに設定する。 user_id_list_json(List型) Listの中がdict
-        user_id_list_json = [{"user":1},{"user":2}]
+        user_id_list_json = [{"user":user1_id},{"user":user2_id}]
         actual = get_contributors(False, user_id_list_json=user_id_list_json)
         expected = [{
-                    'userid' : 1,
+                    'userid' : user1_id,
                     'username': "",
                     'email' : "user1@sample.com",
                     'error': ''
                     },{
-                    'userid' : 2,
+                    'userid' : user2_id,
                     'username': "",
                     'email' : "user2@sample.com",
                     'error': ''
@@ -5150,17 +5156,17 @@ def test_get_contributors(app, db, users_1, db_records_1):
         assert actual == expected
 
         # type of user_id_list_json is List but contents are int
-        user_id_list_json = [1, 2]
+        user_id_list_json = [user1_id, user2_id]
         actual = get_contributors(False, user_id_list_json=user_id_list_json)
         expected = [
             {
-                'userid' : 1,
+                'userid' : user1_id,
                 'username': "",
                 'email' : "user1@sample.com",
                 'error': ''
             },
             {
-                'userid' : 2,
+                'userid' : user2_id,
                 'username': "",
                 'email' : "user2@sample.com",
                 'error': ''
@@ -5188,7 +5194,7 @@ def test_get_contributors(app, db, users_1, db_records_1):
 
         # pid_value=196.0を設定
         user_profile_1 = UserProfile(
-            user_id=1,
+            user_id=user1_id,
             _username="ユーザー1",
             fullname="ユーザー1 full",
             timezone="asia",
@@ -5196,7 +5202,7 @@ def test_get_contributors(app, db, users_1, db_records_1):
             _displayname="display ユーザー1"
         )
         user_profile_2 = UserProfile(
-            user_id=2,
+            user_id=user2_id,
             _username="ユーザー2",
             fullname="ユーザー2 full",
             timezone="asia",
@@ -5225,30 +5231,30 @@ def test_get_contributors(app, db, users_1, db_records_1):
 
         expected = [
             {
-                'userid' : 2,
+                'userid' : user2_id,
                 'username': "display ユーザー2",
                 'email' : "user2@sample.com",
                 'error': ''
             }
         ]
         # user_id_list_jsonを設定
-        user_id_list_json = [2]
+        user_id_list_json = [user2_id]
         actual = get_contributors(None, user_id_list_json=user_id_list_json)
         assert sorted(actual, key=lambda x: x["userid"]) == sorted(expected, key=lambda x: x["userid"])
 
         # WEKO_ITEMS_UI_PROXY_POSTING is False
         app.config["WEKO_ITEMS_UI_PROXY_POSTING"] = False
-        user_id_list_json = [1, 2]
+        user_id_list_json = [user1_id, user2_id]
         actual = get_contributors(None, user_id_list_json=user_id_list_json)
         expected = [
             {
-                'userid' : 1,
+                'userid' : user1_id,
                 'username': "display ユーザー1",
                 'email' : "user1@sample.com",
                 'error': ''
             },
             {
-                'userid' : 2,
+                'userid' : user2_id,
                 'username': "display ユーザー2",
                 'email' : "user2@sample.com",
                 'error': ''

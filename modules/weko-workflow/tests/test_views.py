@@ -7,6 +7,7 @@ import traceback
 from unittest.mock import MagicMock
 from weko_workflow.api import WorkActivity
 import pytest
+from flask_babel import force_locale
 from mock import patch
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm import joinedload
@@ -23,7 +24,7 @@ from invenio_pidstore.models import PersistentIdentifier, PIDStatus
 from invenio_cache import current_cache
 
 from weko_admin.models import AdminSettings
-from weko_deposit.api import WekoDeposit
+from weko_deposit.api import WekoDeposit, WekoRecord
 from weko_workflow.config import WEKO_WORKFLOW_TODO_TAB, WEKO_WORKFLOW_WAIT_TAB,WEKO_WORKFLOW_ALL_TAB
 from flask_login.utils import login_user,logout_user
 from invenio_accounts.testutils import login_user_via_session as login
@@ -1266,19 +1267,11 @@ def test_previous_action(
     with patch("weko_workflow.views.WorkActivity.get_activity_by_id",side_effect=[db_register_full_action["activities"][0],None])\
         , patch("weko_workflow.api.WorkActivity.get_activity_action_role",
            return_value=({'allow': []}, {'allow': []})):
-        if users_index in [1, 2, 6]:
-            res = client.post(url, json=input)
-            data = response_data(res)
-            assert res.status_code==500
-            assert data["code"] == -1
-            assert data["msg"] == "can not get activity detail"
-        else:
-            with pytest.raises(Exception) as e:
-                res = client.post(url, json=input)
-                data = response_data(res)
-                assert res.status_code==500
-                assert data["code"] == -1
-                assert data["msg"] == "can not get activity detail"
+        res = client.post(url, json=input)
+        data = response_data(res)
+        assert res.status_code==500
+        assert data["code"] == -1
+        assert data["msg"] == "can not get activity detail"
 
     # not create activity history
     url = url_for('weko_workflow.previous_action',
@@ -6219,7 +6212,7 @@ def test_check_authority_action2(app, client, users, db_register_full_action, mo
                                 action_id=3,
                                 contain_login_item_application=False,
                                 action_order=1)
-            im.json['shared_user_ids'] = [1,2,3,4,5,6]
+            im.json['shared_user_ids'] = [users[4]['id'], users[0]['id']]
             assert 0 == check_authority_action(activity_id='11',
                                 action_id=3,
                                 contain_login_item_application=False,
@@ -7024,10 +7017,11 @@ def test_edit_item_direct_after_login_03(client, users, db_register_full_action,
     mock_resolve = mocker.patch.object(Resolver, 'resolve', return_value = (None, None))
     login(client=client, email=users[users_index]["email"])
     url = url_for("weko_workflow.edit_item_direct_after_login", pid_value="1")
-    res = client.get(url)
-    mock_render_template.assert_called_with("weko_theme/error.html", error="Record does not exist.")
-    mock_resolve.assert_called_once()
-    assert res.status_code == status_code
+    with force_locale('en'):
+        res = client.get(url)
+        mock_render_template.assert_called_with("weko_theme/error.html", error="Record does not exist.")
+        mock_resolve.assert_called_once()
+        assert res.status_code == status_code
 
 # .tox/c1/bin/pytest --cov=weko_workflow tests/test_views.py::test_edit_item_direct_after_login_03_2 -v --cov-branch --cov-report=term --basetemp=/code/modules/weko-workflow/.tox/c1/tmp
 @pytest.mark.parametrize(
@@ -7050,10 +7044,11 @@ def test_edit_item_direct_after_login_03_2(client, users, db_register_full_actio
     mock_resolve = mocker.patch.object(Resolver, 'resolve', side_effect=PIDDoesNotExistError(None, None))
     login(client=client, email=users[users_index]["email"])
     url = url_for("weko_workflow.edit_item_direct_after_login", pid_value="1")
-    res = client.get(url)
-    mock_render_template.assert_called_with("weko_theme/error.html", error="Record does not exist.")
-    mock_resolve.assert_called_once()
-    assert res.status_code == status_code
+    with force_locale('en'):
+        res = client.get(url)
+        mock_render_template.assert_called_with("weko_theme/error.html", error="Record does not exist.")
+        mock_resolve.assert_called_once()
+        assert res.status_code == status_code
 
 # .tox/c1/bin/pytest --cov=weko_workflow tests/test_views.py::test_edit_item_direct_after_login_04 -v --cov-branch --cov-report=term --basetemp=/code/modules/weko-workflow/.tox/c1/tmp
 @pytest.mark.parametrize(
@@ -7069,6 +7064,9 @@ def test_edit_item_direct_after_login_04(client, users, db_register_full_action,
     mock_redis = MagicMock(exists=MagicMock(return_value=False))
     mock_sessionstorage = MagicMock(redis=mock_redis)
     mocker.patch.object(RedisConnection, 'connection', return_value = mock_sessionstorage)
+    record = WekoRecord.get_record_by_pid("1")
+    record["path"] = []
+    record.commit()
     login(client=client, email=users[users_index]["email"])
     url = url_for("weko_workflow.edit_item_direct_after_login", pid_value="1")
     res = client.get(url)
@@ -7286,7 +7284,7 @@ def test_display_activity_item_link_with_item_link(client, users, item_type,db_r
     cur_action = MagicMock()
     histories = []
     item_metadata = {'title': 'Test Item'}
-    steps = []
+    steps = [{'ActionId': action_id}]
     temporary_comment = None
     workflow_detail = MagicMock()
     workflow_detail.itemtype_id = 1
@@ -7373,7 +7371,7 @@ def test_display_activity_item_link_with_no_item_link(client, users, item_type,d
     cur_action = MagicMock()
     histories = []
     item_metadata = {'title': 'Test Item'}
-    steps = []
+    steps = [{'ActionId': action_id}]
     temporary_comment = None
     workflow_detail = MagicMock()
     workflow_detail.itemtype_id = 1
@@ -7456,7 +7454,7 @@ def test_display_activity_item_link_with_item_link_exception(client, users, item
     cur_action = MagicMock()
     histories = []
     item_metadata = {'title': 'Test Item'}
-    steps = []
+    steps = [{'ActionId': action_id}]
     temporary_comment = None
     workflow_detail = MagicMock()
     workflow_detail.itemtype_id = 1
@@ -7537,7 +7535,7 @@ def test_display_activity_approval_with_relation(client, users, item_type, db_re
     cur_action.action_endpoint = 'approval'
     histories = []
     item_metadata = {'title': 'Test Item'}
-    steps = []
+    steps = [{'ActionId': action_id}]
     temporary_comment = None
     workflow_detail = MagicMock()
     workflow_detail.itemtype_id = 1
@@ -7631,7 +7629,7 @@ def test_display_activity_approval_without_relation(client, users, item_type, db
     cur_action.action_endpoint = 'approval'
     histories = []
     item_metadata = {'title': 'Test Item'}
-    steps = []
+    steps = [{'ActionId': action_id}]
     temporary_comment = None
     workflow_detail = MagicMock()
     workflow_detail.itemtype_id = 1
@@ -7719,7 +7717,7 @@ def test_display_activity_approval_with_relation_exception(client, users, item_t
     cur_action.action_endpoint = 'approval'
     histories = []
     item_metadata = {'title': 'Test Item'}
-    steps = []
+    steps = [{'ActionId': action_id}]
     temporary_comment = None
     workflow_detail = MagicMock()
     workflow_detail.itemtype_id = 1

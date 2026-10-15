@@ -505,10 +505,13 @@ class TestWorkActivity:
                 assert size == conditions.get('sizeall')[0] if conditions.get('sizeall') else '20'
                 assert page == conditions.get('pagesall')[0] if conditions.get('pagesall') else '1'
                 assert max_page == 1
-                assert count == 1
+                assert count == 2
                 assert name_param == ''
-                assert activities[0].activity_id == db_register_activity.get('activity')[0].activity_id
-                assert activities[0].title == db_register_activity.get('activity')[0].title
+                assert [a.activity_id for a in activities] == [
+                    db_register_activity['activity'][2].activity_id,
+                    db_register_activity['activity'][0].activity_id,
+                ]
+                assert [a.title for a in activities] == ['contributor-wait', 'contributor-todo']
             else:
                 assert False
 
@@ -663,12 +666,12 @@ class TestWorkActivity:
             3:{# test_role01_user
                 "todo":[42, 38, 37, 34, 33, 32, 31, 27, 22, 21, 19, 18, 16, 14, 5],
                 "wait":[17],
-                "all":[42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 19, 18, 16, 14, 5]
+                "all":[42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 19, 18, 17, 16, 14, 5]
             },
             4:{# test_role01_comadmin
                 "todo":[42, 41, 40, 38, 34, 32, 26, 23, 22, 18, 16, 14, 12, 11, 10, 7, 6, 5],
                 "wait":[39],
-                "all":[42, 41, 40, 38, 34, 32, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5]
+                "all":[42, 41, 40, 39, 38, 34, 32, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5]
             },
             5:{# test_role02_user
                 "todo":[40,35,19,15,10],
@@ -983,6 +986,7 @@ def test_publish(mock_db_commit, mock_WekoIndexer, mock_FileSecretDownload):
     def create_mock_record(publish_status, accessroles, filenames, recid='12345'):
         attribute_value_mlt = [{'accessrole': role, 'filename': filename} for role, filename in zip(accessroles, filenames)]
         record = MockRecord({
+            '_deposit': {'status': 'draft'},
             'publish_status': publish_status,
             'recid': recid,
             'some_field': {
@@ -995,6 +999,8 @@ def test_publish(mock_db_commit, mock_WekoIndexer, mock_FileSecretDownload):
     def assert_publish(record, status, reset_mock=True):
         update_item.publish(record, status)
         assert record['publish_status'] == status
+        if status in {PublishStatus.PUBLIC.value, PublishStatus.PRIVATE.value}:
+            assert record['_deposit']['status'] == 'published'
         record.commit.assert_called_once()
         mock_db_commit.assert_called()
         mock_WekoIndexer.return_value.update_search_data.assert_called_with(record, update_revision=False, field='publish_status')
@@ -1084,6 +1090,7 @@ def test_publish(mock_db_commit, mock_WekoIndexer, mock_FileSecretDownload):
 
     # attribute_value_mltが空のリストの場合のテスト
     record_empty_role = MockRecord({
+        '_deposit': {'status': 'draft'},
         'publish_status': PublishStatus.PRIVATE.value,
         'recid': '12345',
         'some_field': {
@@ -1096,6 +1103,7 @@ def test_publish(mock_db_commit, mock_WekoIndexer, mock_FileSecretDownload):
 
     # "accessrole"が欠落しているケースのテスト
     record_no_role = MockRecord({
+        '_deposit': {'status': 'draft'},
         'publish_status': PublishStatus.PRIVATE.value,
         'recid': '12345',
         'some_field': {
@@ -1108,6 +1116,7 @@ def test_publish(mock_db_commit, mock_WekoIndexer, mock_FileSecretDownload):
 
     # "attribute_value_mlt"が辞書ではない場合のテスト
     record_non_dict_attribute_value_mlt = MockRecord({
+        '_deposit': {'status': 'draft'},
         'publish_status': PublishStatus.PRIVATE.value,
         'recid': '12345',
         'some_field': {
@@ -2360,6 +2369,23 @@ def test___create_self_user_id_json(app):
 # def query_activities_by_tab_is_wait(query)
 # .tox/c1/bin/pytest --cov=weko_workflow tests/test_api.py::test_query_activities_by_tab_is_wait -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-workflow/.tox/c1/tmp
 def test_query_activities_by_tab_is_wait(users, db):
+    def rendered_query(query):
+        compiled = query.statement.compile(dialect=db.engine.dialect)
+        sql = str(compiled)
+        for name, values in compiled.params.items():
+            token = '__[POSTCOMPILE_{}]'.format(name)
+            if token in sql:
+                prefix, _, number = name.rpartition('_')
+                placeholders = ['%({}_{})s'.format(prefix, int(number) + i)
+                                for i in range(len(values))]
+                rendered = ', '.join(placeholders)
+                sql = sql.replace(token, rendered)
+                for column in ('workflow_flow_action_role.action_role',
+                               'workflow_activity_action.action_handler'):
+                    expression = '{} NOT IN ({})'.format(column, rendered)
+                    sql = sql.replace('(' + expression + ')', expression)
+        return sql
+
     current_app.config['WEKO_WORKFLOW_ENABLE_SHOW_ACTIVITY'] = False
     with patch("flask_login.utils._get_user", return_value=users[0]['obj']):
         query = db.session.query(
@@ -2440,7 +2466,7 @@ def test_query_activities_by_tab_is_wait(users, db):
                         "EXISTS (" \
                             "SELECT * \nFROM jsonb_array_elements_text(records_metadata.json -> %(json_1)s) AS elem \nWHERE CAST(elem AS VARCHAR) IN (%(param_19)s)))"
         ret = WorkActivity.query_activities_by_tab_is_wait(query, False, True, [1])
-        assert str(ret).find(expected) != -1
+        assert rendered_query(ret).find(expected) != -1
 
     # admin user
     with patch("flask_login.utils._get_user", return_value=users[1]['obj']):
@@ -2450,7 +2476,7 @@ def test_query_activities_by_tab_is_wait(users, db):
             "%(action_handler_1)s", "%(action_handler_1)s, %(action_handler_2)s"
         )
         ret = WorkActivity.query_activities_by_tab_is_wait(query, True, False, [1])
-        assert str(ret).find(admin_expected) != -1
+        assert rendered_query(ret).find(admin_expected) != -1
 
     current_app.config['WEKO_WORKFLOW_ENABLE_SHOW_ACTIVITY'] = True
     with patch("flask_login.utils._get_user", return_value=users[0]['obj']):
@@ -2460,7 +2486,7 @@ def test_query_activities_by_tab_is_wait(users, db):
                 _WorkFlow.flows_name,
                 _Action.action_name,
                 Role.name
-            ).outerjoin(_Flow).outerjoin(
+            ).select_from(_Activity).outerjoin(_Flow).outerjoin(
                 _WorkFlow,
                 and_(_Activity.workflow_id == _WorkFlow.id,)
             ).outerjoin(_Action).outerjoin(_FlowAction).outerjoin(_FlowActionRole).outerjoin(
@@ -2484,7 +2510,7 @@ def test_query_activities_by_tab_is_wait(users, db):
                         "AND workflow_flow_action_role.action_role_exclude = %(action_role_exclude_1)s " \
                         "OR workflow_activity_action.action_handler NOT IN (%(action_handler_1)s))"
         ret = WorkActivity.query_activities_by_tab_is_wait(query, False, False, [])
-        assert str(ret).find(expected) != -1
+        assert rendered_query(ret).find(expected) != -1
 
     # admin user
     with patch("flask_login.utils._get_user", return_value=users[1]['obj']):
@@ -2492,7 +2518,7 @@ def test_query_activities_by_tab_is_wait(users, db):
             "%(action_handler_1)s", "%(action_handler_1)s, %(action_handler_2)s"
         )
         ret = WorkActivity.query_activities_by_tab_is_wait(query, True, False, [])
-        assert str(ret).find(admin_expected) != -1
+        assert rendered_query(ret).find(admin_expected) != -1
 
 # def query_activities_by_tab_is_all(query, is_community_admin, community_user_ids)
 # .tox/c1/bin/pytest --cov=weko_workflow tests/test_api.py::test_query_activities_by_tab_is_all -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-workflow/.tox/c1/tmp
@@ -2835,24 +2861,26 @@ def test_get_user_ids_of_request_mails_by_record_id(
 # .tox/c1/bin/pytest --cov=weko_workflow tests/test_api.py::test_check_user_role_for_mail -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-workflow/.tox/c1/tmp
 def test_check_user_role_for_mail(users):
     activity = WorkActivity()
+    contributor_role_id = Role.query.filter_by(name='Contributor').one().id
+    repository_role_id = Role.query.filter_by(name='Repository Administrator').one().id
     # user is admin
     roles={'allow':[5],'deny':[]}
     assert activity.check_user_role_for_mail(users[2]["id"], roles)
 
     # user is cont, cont in allow
-    roles={'allow':[3],'deny':[]}
+    roles={'allow':[contributor_role_id],'deny':[]}
     assert activity.check_user_role_for_mail(users[0]["id"], roles)
 
     # user is cont, cont not in allow
-    roles={'allow':[2],'deny':[]}
+    roles={'allow':[repository_role_id],'deny':[]}
     assert not activity.check_user_role_for_mail(users[0]["id"], roles)
 
     # user is cont, cont in deny
-    roles={'allow':[],'deny':[3]}
+    roles={'allow':[],'deny':[contributor_role_id]}
     assert not activity.check_user_role_for_mail(users[0]["id"], roles)
 
     # user is cont, cont not in deny
-    roles={'allow':[],'deny':[2]}
+    roles={'allow':[],'deny':[repository_role_id]}
     assert activity.check_user_role_for_mail(users[0]["id"], roles)
 
 # def get_recirds_for_request_mail_by_mailaddress

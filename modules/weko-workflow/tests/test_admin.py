@@ -6,6 +6,7 @@ import pytest
 import uuid
 from mock import patch,Mock
 from flask import json, url_for, make_response, current_app
+from flask_babel import refresh
 from invenio_accounts.testutils import login_user_via_session as login
 from werkzeug.exceptions import InternalServerError ,Forbidden
 from weko_workflow.admin import FlowSettingView,WorkFlowSettingView
@@ -659,6 +660,8 @@ class TestWorkFlowSettingView:
         # Note: args = (Flask, Template, context)
         render_context = args[2]
         assert len(render_context["repositories"]) == 2
+        assert render_context["repositories"][0] == {"id": "Root Index"}
+        assert render_context["repositories"][1].id == 'comm01'
 
         # Community Administrator can see repositories they have access to
         comadmin_user_email = users[3]["email"]
@@ -669,7 +672,8 @@ class TestWorkFlowSettingView:
         args, kwargs = mock_render.call_args
         # Note: args = (Flask, Template, context)
         render_context = args[2]
-        assert len(render_context["repositories"]) == 2
+        assert len(render_context["repositories"]) == 1
+        assert [repository.id for repository in render_context["repositories"]] == ['comm01']
 
 
     #     def update_workflow(self, workflow_id='0'):
@@ -693,14 +697,15 @@ class TestWorkFlowSettingView:
         # (5, 200),
         # (6, 200),
     ])
-    def test_update_workflow_acl(self,client,db_register2,workflow,users,users_index,status_code):
+    def test_update_workflow_acl(self,client,db_register2,workflow,users,users_index,status_code,
+                                 user_activity_log_partition_table):
         login(client=client, email=users[users_index]['email'])
         url = '/admin/workflowsetting/{}'.format(0)
         q = WorkFlow.query.all()
         assert len(q) == 2
         with patch("flask.templating._render", return_value=""):
-            with pytest.raises(AttributeError):
-                res =  client.post(url)
+            res =  client.post(url)
+            assert res.status_code == 400
         q = WorkFlow.query.all()
         assert len(q) == 2
 
@@ -736,11 +741,20 @@ class TestWorkFlowSettingView:
             "open_restricted": True,
             "is_gakuninrdm": True
         }
+        before_invalid = [
+            {column.name: getattr(row, column.name) for column in WorkFlow.__table__.columns}
+            for row in WorkFlow.query.order_by(WorkFlow.id).all()
+        ]
         login(client=client, email=users[users_index]['email'])
         url = '/admin/workflowsetting/{}'.format(workflow['workflow'].flows_id)
         with patch("flask.templating._render", return_value=""):
             res = client.post(url, data=json.dumps(data), headers=[('Content-Type', 'application/json')])
         assert res.status_code == 200
+        assert res.json['code'] == 0
+        assert [
+            {column.name: getattr(row, column.name) for column in WorkFlow.__table__.columns}
+            for row in WorkFlow.query.order_by(WorkFlow.id).all()
+        ] == before_invalid
         q = WorkFlow.query.filter_by(id=1).first()
         assert q.open_restricted == False
         assert q.is_gakuninrdm == False
@@ -751,9 +765,12 @@ class TestWorkFlowSettingView:
         assert q.index_tree_id == None
         q = WorkflowRole.query.all()
         assert len(q) == 0
+        contributor_role_id = next(
+            role.id for role in users[0]['obj'].roles if role.name == 'Contributor'
+        )
         data = {
             "id": 1,
-            "list_hide": [4],
+            "list_hide": [contributor_role_id],
             "flows_name": "test",
             "itemtype_id": 1,
             "flow_id": 1,
@@ -776,6 +793,7 @@ class TestWorkFlowSettingView:
         assert q.index_tree_id == 1
         q = WorkflowRole.query.all()
         assert len(q) == 1
+        assert q[0].role_id == contributor_role_id
 
         data = {
             "list_hide": [],
@@ -954,16 +972,19 @@ class TestWorkFlowSettingView:
     # .tox/c1/bin/pytest --cov=weko_workflow tests/test_admin.py::TestWorkFlowSettingView::test_get_language_workflows -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-workflow/.tox/c1/tmp
     def test_get_language_workflows(self, app, users):
         with app.test_request_context():
+            refresh()
             assert WorkFlowSettingView.get_language_workflows("display")=="Display"
             assert WorkFlowSettingView.get_language_workflows("hide")=="Hide"
             assert WorkFlowSettingView.get_language_workflows("display_hide")=="Display/Hide"
 
         with app.test_request_context(headers=[("Accept-Language", "en")]):
+            refresh()
             assert WorkFlowSettingView.get_language_workflows("display")=="Display"
             assert WorkFlowSettingView.get_language_workflows("hide")=="Hide"
             assert WorkFlowSettingView.get_language_workflows("display_hide")=="Display/Hide"
 
         with app.test_request_context(headers=[("Accept-Language", "ja")]):
+            refresh()
             assert WorkFlowSettingView.get_language_workflows("display")=="表示"
             assert WorkFlowSettingView.get_language_workflows("hide")=="非表示"
             assert WorkFlowSettingView.get_language_workflows("display_hide")=="表示/非表示"
