@@ -60,7 +60,12 @@ from invenio_search import RecordsSearch,InvenioSearch
 from invenio_search.engine import search
 from io import BytesIO
 from mock import patch,Mock
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 from tests.helpers import json_data
 
 from weko_admin import WekoAdmin
@@ -212,25 +217,71 @@ def cache_config():
         )
     return config
 
+
+@pytest.fixture(scope='session')
+def database_uri():
+    """Own a dedicated database, including cleanup after fixture failures."""
+    uri = make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+        database='workspace_ut_' + uuid.uuid4().hex
+    ).render_as_string(hide_password=False)
+    create_database(uri)
+    try:
+        yield uri
+    finally:
+        drop_database(uri)
+
+
 @pytest.fixture()
-def base_app(instance_path, search_class, cache_config):
+def versioning_listeners():
+    """Release only the global versioning listeners installed by this app.
+
+    InvenioDB calls make_versioned for every application. Class-level
+    listeners accumulate across applications unless their owner removes them.
+    Keep the model/version mappings and real versioning behavior intact.
+    """
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
+@pytest.fixture()
+def base_app(instance_path, search_class, cache_config, database_uri,
+             versioning_listeners):
     """Flask application fixture."""
     app_ = Flask('testapp', instance_path=instance_path)
     app_.config.update(
         SECRET_KEY='SECRET_KEY',
         TESTING=True,
         SERVER_NAME='TEST_SERVER.localdomain',
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                           'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_uri,
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
         ACCOUNTS_USERINFO_HEADERS=True,
         WEKO_PERMISSION_SUPER_ROLE_USER=['System Administrator',
                                          'Repository Administrator'],
         WEKO_PERMISSION_ROLE_COMMUNITY=['Community Administrator'],
         THEME_SITEURL = 'https://localhost',
-        CACHE_REDIS_URL='redis://redis:6379/0',
+        CACHE_REDIS_URL=os.environ['CACHE_REDIS_URL'],
         CACHE_REDIS_DB='0',
-        CACHE_REDIS_HOST="redis",
+        CACHE_REDIS_HOST=os.environ['CACHE_REDIS_HOST'],
         REDIS_PORT='6379',
         ACCOUNTS_SESSION_REDIS_DB_NO = 1,
         WEKO_RECORDS_UI_LICENSE_DICT=[
@@ -525,6 +576,7 @@ def base_app(instance_path, search_class, cache_config):
         WEKO_WORKSPACE_OA_STATUS_MAPPING=WEKO_WORKSPACE_OA_STATUS_MAPPING,
     )
 
+    app_.config.update(cache_config)
     app_.testing = True
     Babel(app_)
     InvenioI18N(app_)
@@ -574,10 +626,13 @@ def db(app):
     """Database fixture."""
     if not database_exists(str(db_.engine.url)):
         create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.drop_all()
+        db_.engine.dispose()
     # drop_database(str(db_.engine.url))
 
 
@@ -620,9 +675,6 @@ def mocker_itemtype(mocker):
 
 @pytest.yield_fixture()
 def client_api(app):
-    from weko_workspace.views import blueprint_itemapi as weko_workspace_blueprint_itemapi
-    app.register_blueprint(weko_workspace_blueprint_itemapi)
-
     with app.test_client() as client:
         yield client
 
