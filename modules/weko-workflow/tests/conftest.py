@@ -9,10 +9,11 @@ import shutil
 import sys
 import tempfile
 import uuid
+from celery import Celery, current_app as current_celery_app
 
 from datetime import datetime, timedelta
-from flask import Flask, url_for, Response
-from flask_babel import Babel, lazy_gettext as _
+from flask import Flask, url_for, Response, g
+from flask_babel import Babel, lazy_gettext as _, refresh
 from flask_menu import Menu
 from flask_oauthlib.provider import OAuth2Provider
 from invenio_assets import InvenioAssets
@@ -22,6 +23,8 @@ from invenio_accounts.testutils import create_test_user
 from invenio_accounts import InvenioAccounts
 from invenio_accounts.models import User, Role
 from invenio_cache import InvenioCache
+from invenio_celery import InvenioCelery
+from invenio_indexer import InvenioIndexer
 from invenio_communities.views.ui import blueprint as invenio_communities_blueprint
 from invenio_communities.models import Community
 from invenio_deposit import InvenioDeposit
@@ -107,6 +110,11 @@ from weko_workflow.utils import MappingData, generate_guest_activity_token_value
 from weko_workflow.views import workflow_blueprint as weko_workflow_blueprint
 from sqlalchemy_utils.functions import create_database, database_exists, \
     drop_database
+from sqlalchemy.engine.url import make_url
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
 from .helpers import (
     json_data, create_record, fill_oauth2_headers, create_activity, create_flow)
 from weko_deposit.config import PIDRELATIONS_RELATION_TYPES
@@ -144,8 +152,10 @@ def search_class():
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 @pytest.fixture(scope="function")
 def db_session(db_session):
@@ -234,10 +244,53 @@ def admin_settings(db):
 
 
 @pytest.fixture()
-def base_app(instance_path, search_class, cache_config):
+def versioning_listeners():
+    """Release only the global versioning listeners installed by this app."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
+@pytest.fixture()
+def celery_app():
+    """Give each Flask app its own real Celery app and connection pools."""
+    previous = current_celery_app._get_current_object()
+    owned = Celery('weko_workflow_test_' + uuid.uuid4().hex,
+                   broker='memory://', backend='cache+memory://')
+    try:
+        yield owned
+    finally:
+        owned.close()
+        previous.set_current()
+
+
+@pytest.fixture()
+def base_app(instance_path, search_class, cache_config, versioning_listeners, celery_app):
     """Flask application fixture."""
     app_ = Flask('testapp', instance_path=instance_path)
     app_.config.update(
+        BROKER_URL='memory://',
+        CELERY_BROKER_URL='memory://',
+        CELERY_RESULT_BACKEND='cache+memory://',
         SECRET_KEY='SECRET_KEY',
         TESTING=True,
         SERVER_NAME='TEST_SERVER.localdomain',
@@ -604,7 +657,17 @@ def base_app(instance_path, search_class, cache_config):
         PIDRELATIONS_RELATION_TYPES=PIDRELATIONS_RELATION_TYPES,
     )
 
+    database_url = make_url(app_.config['SQLALCHEMY_DATABASE_URI'])
+    app_.config['SQLALCHEMY_DATABASE_URI'] = database_url.set(
+        database='weko_workflow_test_' + uuid.uuid4().hex
+    ).render_as_string(hide_password=False)
+
     app_.testing = True
+    @app_.before_request
+    def reset_request_caches():
+        g.pop('_login_user', None)
+        refresh()
+
     with app_.app_context():
         Babel(app_)
         InvenioI18N(app_)
@@ -616,6 +679,14 @@ def base_app(instance_path, search_class, cache_config):
         InvenioFilesREST(app_)
         InvenioCache(app_)
         InvenioDB(app_)
+        InvenioCelery(app_, entry_point_group=None)
+        InvenioIndexer(app_)
+        app_.config['INDEXER_MQ_ROUTING_KEY'] = 'weko_workflow_test_' + uuid.uuid4().hex
+        app_.config['INDEXER_MQ_QUEUE'] = Queue(
+            app_.config['INDEXER_MQ_ROUTING_KEY'],
+            exchange=app_.config['INDEXER_MQ_EXCHANGE'],
+            routing_key=app_.config['INDEXER_MQ_ROUTING_KEY'],
+        )
         InvenioDeposit(app_)
         InvenioStats(app_)
         InvenioAssets(app_)
@@ -662,10 +733,17 @@ def base_app(instance_path, search_class, cache_config):
 
 
 @pytest.yield_fixture()
-def app(base_app):
+def app(base_app, celery_app):
     """Flask application fixture."""
     with base_app.app_context():
-        yield base_app
+        queue = base_app.config['INDEXER_MQ_QUEUE']
+        with celery_app.connection_or_acquire() as connection:
+            queue(connection).declare()
+        try:
+            yield base_app
+        finally:
+            with celery_app.connection_or_acquire() as connection:
+                queue(connection).delete()
 
 
 @pytest.yield_fixture()
@@ -677,14 +755,18 @@ def i18n_app(app):
 @pytest.yield_fixture()
 def db(app):
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.drop_all()
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
-    drop_database(str(db_.engine.url))
+    database_url = db_.engine.url
+    assert database_url.database.startswith('weko_workflow_test_')
+    database_uri = database_url.render_as_string(hide_password=False)
+    assert not database_exists(database_uri)
+    create_database(database_uri)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_uri)
 
 
 @pytest.yield_fixture()
@@ -714,8 +796,19 @@ def req_context(client,app):
 @pytest.fixture
 def redis_connect(app):
     redis_connection = RedisConnection().connection(db=app.config['CACHE_REDIS_DB'], kv = True)
-    redis_connection.put('updated_json_schema_A-00000001-10001',bytes('test', 'utf-8'))
-    return redis_connection
+    key = 'updated_json_schema_A-00000001-10001'
+    owned = False
+    try:
+        assert not redis_connection.redis.exists(key)
+        owned = True
+        redis_connection.put(key,bytes('test', 'utf-8'))
+        yield redis_connection
+    finally:
+        try:
+            if owned:
+                redis_connection.delete(key)
+        finally:
+            redis_connection.redis.connection_pool.disconnect()
 
 @pytest.fixture()
 def without_remove_session(app):
@@ -2944,9 +3037,8 @@ def db_records_for_doi_validation_test(db, location):
 @pytest.fixture()
 def add_file(db, location):
     def factory(record, contents=b'test example', filename="generic_file.txt"):
-        b = Bucket.create()
-        r = RecordsBuckets.create(bucket=b, record=record.model)
-        ObjectVersion.create(b,filename)
+        b = record.files.bucket
+        r = RecordsBuckets.query.filter_by(record_id=record.id, bucket_id=b.id).one()
         stream = BytesIO(contents)
         record.files[filename] = stream
         record.files.dumps()
@@ -4587,6 +4679,10 @@ def db_register_activity(app, db, db_records, workflow_approval, users):
         db.session.add(flow_define)
     db.session.commit()
 
+    for activity in activities:
+        activity.flow_id = flow_define.id
+    workflow_approval['workflow'].flow_id = flow_define.id
+
     # Register data in workflow_flow_action table
     flow_actions = []
     flow_actions.append(
@@ -4608,13 +4704,18 @@ def db_register_activity(app, db, db_records, workflow_approval, users):
             flow_id=flow_define.flow_id,
             action_id=1,
             action_version='1.0.0',
-            action_order=5,
+            action_order=7,
             action_condition='',
             action_status='A',
             action_date=datetime.strptime('2023/07/01 14:00:00', '%Y/%m/%d %H:%M:%S'),
             send_mail_setting={},
         )
     )
+    flow_actions.append(FlowAction(
+        status='N', flow_id=flow_define.flow_id, action_id=2,
+        action_version='1.0.0', action_order=5, action_condition='',
+        action_status='A', send_mail_setting={},
+    ))
     with db.session.begin_nested():
         db.session.add_all(flow_actions)
     db.session.commit()
@@ -4626,7 +4727,7 @@ def db_register_activity(app, db, db_records, workflow_approval, users):
             activity_id=activities[2].activity_id,
             action_id=2,
             action_status='M',
-            action_handler=users[2]['id'],
+            action_handler=users[3]['id'],
             action_order=5
         )
     )

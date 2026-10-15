@@ -96,7 +96,7 @@ def create_record(record_data, item_data):
         rec_uuid = uuid.uuid4()
         recid = PersistentIdentifier.create('recid', record_data["recid"],object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
         depid = PersistentIdentifier.create('depid', record_data["recid"],object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
-        rel = PIDRelation.create(recid, depid, relation_type_draft.id)
+        rel = PIDRelation.create(recid, depid, relation_type_draft.id, index=0)
         db.session.add(rel)
         parent=None
         doi = None
@@ -111,7 +111,8 @@ def create_record(record_data, item_data):
             parent = PersistentIdentifier.get("recid",int(float(record_data["recid"])))
             recid_p = PIDRelation.get_child_relations(parent).one_or_none()
             relation_type = relation_type_draft if record_recid.endswith('.0') else relation_type_version
-            PIDRelation.create(recid_p.parent, recid, relation_type.id)
+            version_index = 0 if record_recid.endswith('.0') else int(record_recid.rsplit('.', 1)[1])
+            PIDRelation.create(recid_p.parent, recid, relation_type.id, index=version_index)
         else:
             parent = PersistentIdentifier.create('parent', "parent:{}".format(record_data["recid"]),object_type='rec', object_uuid=rec_uuid,status=PIDStatus.REGISTERED)
             rel = PIDRelation.create(
