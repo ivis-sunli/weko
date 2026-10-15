@@ -12,8 +12,10 @@
 import os
 import shutil
 import tempfile
+from uuid import uuid4
 
 import pytest
+from celery import Celery, current_app as current_celery_app
 from flask import Flask
 from flask_admin import Admin
 from flask_celeryext import FlaskCeleryExt
@@ -31,7 +33,9 @@ from invenio_i18n import Babel, InvenioI18N
 from invenio_rest import InvenioREST
 from invenio_theme import InvenioTheme
 from simplekv.memory.redisstore import RedisStore
+from sqlalchemy.engine.url import make_url
 from weko_records_ui.config import WEKO_PERMISSION_SUPER_ROLE_USER
+from weko_accounts.config import WEKO_ACCOUNTS_GAKUNIN_GROUP_PATTERN_DICT
 from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 from webargs import fields
 from werkzeug.exceptions import NotFound
@@ -93,20 +97,22 @@ def _app_factory(config=None):
         },
     }
 
+    database_url = make_url(os.environ["SQLALCHEMY_DATABASE_URI"]).set(
+        database="accounts_ut_" + uuid4().hex
+    )
     app.config.update(
         ACCOUNTS_USE_CELERY=False,
         ACCOUNTS_LOCAL_LOGIN_ENABLED=True,
         APP_THEME=["semantic-ui"],
         THEME_ICONS=icons,
-        CELERY_TASK_ALWAYS_EAGER=True,
+        CELERY_ALWAYS_EAGER=True,
         CELERY_CACHE_BACKEND="memory",
-        CELERY_TASK_EAGER_PROPAGATES=True,
+        CELERY_EAGER_PROPAGATES=True,
         CELERY_RESULT_BACKEND="cache",
         LOGIN_DISABLED=False,
         MAIL_SUPPRESS_SEND=True,
         SECRET_KEY="CHANGE_ME",
         # SECURITY_PASSWORD_SALT="CHANGE_ME_ALSO",
-        SECURITY_PASSWORD_SINGLE_HASH=False,
         SECURITY_CONFIRM_EMAIL_WITHIN="2 seconds",
         SECURITY_RESET_PASSWORD_WITHIN="2 seconds",
         SECURITY_CHANGEABLE=True,
@@ -115,8 +121,7 @@ def _app_factory(config=None):
         #SQLALCHEMY_DATABASE_URI=os.environ.get(
         #    "SQLALCHEMY_DATABASE_URI", "sqlite:///test.db"
         #),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_url,
         DB_VERSIONING=False,
         DB_VERSIONING_USER_MODEL=None,
         SERVER_NAME="example.com",
@@ -130,6 +135,7 @@ def _app_factory(config=None):
         ACCOUNTS_JWT_ALOGORITHM = 'HS256',
         ACCOUNTS_JWT_SECRET_KEY = 'None',
         WEKO_PERMISSION_SUPER_ROLE_USER = WEKO_PERMISSION_SUPER_ROLE_USER,
+        WEKO_ACCOUNTS_GAKUNIN_GROUP_PATTERN_DICT=WEKO_ACCOUNTS_GAKUNIN_GROUP_PATTERN_DICT.copy(),
     )
 
     app.config.update(config or {})
@@ -166,30 +172,37 @@ def _app_factory(config=None):
 
     return app
 
-@pytest.fixture
-def app_context(app):
-    with app.app_context():
+@pytest.fixture(autouse=True)
+def app_context(request):
+    if "app" in request.fixturenames:
+        app = request.getfixturevalue("app")
+        with app.test_request_context():
+            yield
+    else:
         yield
 
 def _database_setup(app, request):
     """Set up the database."""
-    with app.app_context():
-        if not database_exists(str(db.engine.url)):
-            create_database(str(db.engine.url))
-        db.create_all()
-
     def teardown():
-        with app.app_context():
-            if database_exists(str(db.engine.url)):
-                drop_database(str(db.engine.url))
-            # Delete sessions in kvsession store
-            if hasattr(app, "kvsession_store") and isinstance(
-                app.kvsession_store, RedisStore
-            ):
-                app.kvsession_store.redis.flushall()
-        shutil.rmtree(app.instance_path)
+        try:
+            with app.app_context():
+                db.session.remove()
+                db.engine.dispose()
+                if database_exists(db.engine.url):
+                    drop_database(db.engine.url)
+                # The Redis service is owned exclusively by this test run.
+                if hasattr(app, "kvsession_store") and isinstance(
+                    app.kvsession_store, RedisStore
+                ):
+                    for key in app.kvsession_store.keys():
+                        app.kvsession_store.delete(key)
+        finally:
+            shutil.rmtree(app.instance_path)
 
     request.addfinalizer(teardown)
+    with app.app_context():
+        create_database(db.engine.url)
+        db.create_all()
     return app
 
 
@@ -223,8 +236,6 @@ def api(request):
             #SQLALCHEMY_DATABASE_URI=os.environ.get(
             #    "SQLALCHEMY_DATABASE_URI", "sqlite:///test.db"
             #),
-            SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
             SERVER_NAME="localhost",
             TESTING=True,
         )
@@ -242,7 +253,7 @@ def api(request):
 @pytest.fixture()
 def app_with_redis_url(request):
     """Flask application fixture with Invenio Accounts."""
-    app = _app_factory(dict(ACCOUNTS_SESSION_REDIS_URL="redis://localhost:6379/0"))
+    app = _app_factory(dict(ACCOUNTS_SESSION_REDIS_URL=os.environ["ACCOUNTS_SESSION_REDIS_URL"]))
     app.config.update(ACCOUNTS_USERINFO_HEADERS=True)
     InvenioAccounts(app)
 
@@ -285,6 +296,15 @@ def task_app(request):
             MAIL_SUPPRESS_SEND=True,
         )
     )
+    previous_celery = current_celery_app._get_current_object()
+    celery = Celery("invenio-accounts-tests", set_as_current=False)
+    celery.set_current()
+
+    def cleanup_celery():
+        previous_celery.set_current()
+        celery.close()
+
+    request.addfinalizer(cleanup_celery)
     FlaskCeleryExt(app)
     InvenioAccounts(app)
     _database_setup(app, request)
@@ -292,16 +312,12 @@ def task_app(request):
 
 
 @pytest.fixture
-def cookie_app(request):
-    """Flask application  enabled."""
-    app = _app_factory(
-        dict(
-            SESSION_COOKIE_SECURE=True,
-            SESSION_COOKIE_DOMAIN="example.com",
-        )
+def cookie_app(app):
+    """Use the same application and database as the users fixture."""
+    app.config.update(
+        SESSION_COOKIE_SECURE=True,
+        SESSION_COOKIE_DOMAIN="example.com",
     )
-    InvenioAccounts(app)
-    _database_setup(app, request)
     return app
 
 
