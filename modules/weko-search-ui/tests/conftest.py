@@ -122,8 +122,9 @@ from pytest_mock import mocker
 from simplekv.memory.redisstore import RedisStore
 from time import sleep
 from sqlalchemy import event
-from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
+from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
 from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 from unittest.mock import Mock, patch, MagicMock
 
@@ -253,10 +254,30 @@ class TestSearch(RecordsSearch):
 #             pass
 
 
-@pytest.yield_fixture(scope="session")
-def search_class():
-    """Search class."""
-    yield TestSearch
+@pytest.fixture(scope="session")
+def isolated_database_uri():
+    uri = make_url(os.environ["SQLALCHEMY_DATABASE_URI"])
+    uri = uri.set(database="weko_search_ui_test_" + uuid.uuid4().hex)
+    value = uri.render_as_string(hide_password=False)
+    create_database(value)
+    try:
+        yield value
+    finally:
+        drop_database(value)
+
+
+@pytest.fixture()
+def resource_prefix():
+    return "weko-search-ui-test-" + uuid.uuid4().hex
+
+
+@pytest.fixture()
+def search_class(resource_prefix):
+    class IsolatedSearch(TestSearch):
+        class Meta(TestSearch.Meta):
+            index = resource_prefix + "-records"
+    return IsolatedSearch
+
 
 from weko_search_ui import WekoSearchUI
 
@@ -265,12 +286,42 @@ from weko_search_ui import WekoSearchUI
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 
 @pytest.fixture()
-def base_app(instance_path, search_class, request):
+def versioning_listeners():
+    """Release this app's global listeners without disabling versioning."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
+@pytest.fixture()
+def base_app(instance_path, search_class, request, isolated_database_uri,
+             resource_prefix, versioning_listeners):
     """Flask application fixture."""
     app_ = Flask(
         "testapp",
@@ -293,7 +344,7 @@ def base_app(instance_path, search_class, request):
         CACHE_REDIS_URL=os.environ.get("CACHE_REDIS_URL", "redis://redis:6379/0"),
         CACHE_REDIS_DB="0",
         CELERY_RESULT_BACKEND_DB_NO="2",
-        CACHE_REDIS_HOST="redis",
+        CACHE_REDIS_HOST=os.environ.get("CACHE_REDIS_HOST", "redis"),
         WEKO_INDEX_TREE_STATE_PREFIX="index_tree_expand_state",
         REDIS_PORT="6379",
         DEPOSIT_DEFAULT_JSONSCHEMA=DEPOSIT_DEFAULT_JSONSCHEMA,
@@ -303,14 +354,14 @@ def base_app(instance_path, search_class, request):
         WEKO_SCHEMA_JPCOAR_V2_SCHEMA_NAME = 'jpcoar_mapping',
         WEKO_SCHEMA_DDI_SCHEMA_NAME = "ddi_mapping",
         INDEXER_FILE_DOC_TYPE="content",
-        INDEXER_DEFAULT_INDEX="weko-item-v1.0.0",
+        INDEXER_DEFAULT_INDEX=resource_prefix + "-weko-item-v1.0.0",
         INDEX_IMG="indextree/36466818-image.jpg",
         # SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
         #                                   'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #     "SQLALCHEMY_DATABASE_URI", "sqlite:///test.db"
         # ),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI','postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=isolated_database_uri,
         SEARCH_OPENSEARCH_HOSTS=os.environ.get("SEARCH_OPENSEARCH_HOSTS", "opensearch"),
         SEARCH_HOSTS=os.environ.get("SEARCH_HOST", "opensearch"),
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
@@ -332,11 +383,11 @@ def base_app(instance_path, search_class, request):
         },
         FILES_REST_OBJECT_KEY_MAX_LEN=255,
         # SEARCH_UI_SEARCH_INDEX=SEARCH_UI_SEARCH_INDEX,
-        SEARCH_UI_SEARCH_INDEX="weko",
+        SEARCH_UI_SEARCH_INDEX=resource_prefix + "-weko",
         CHILD_INDEX_THUMBNAIL_WIDTH = CHILD_INDEX_THUMBNAIL_WIDTH,
         CHILD_INDEX_THUMBNAIL_HEIGHT = CHILD_INDEX_THUMBNAIL_HEIGHT,
         # SEARCH_OPENSEARCH_HOSTS=os.environ.get("INVENIO_ELASTICSEARCH_HOST"),
-        SEARCH_INDEX_PREFIX="{}-".format("test"),
+        SEARCH_INDEX_PREFIX="",
         SEARCH_CLIENT_CONFIG={"http_auth":(os.environ['INVENIO_OPENSEARCH_USER'],os.environ['INVENIO_OPENSEARCH_PASS']),"use_ssl":True, "verify_certs":False},
         OAISERVER_ID_PREFIX="oai:inveniosoftware.org:recid/",
         OAISERVER_RECORD_INDEX="_all",
@@ -393,7 +444,7 @@ def base_app(instance_path, search_class, request):
         WEKO_ADMIN_CACHE_TEMP_DIR_INFO_KEY_DEFAULT="cache::temp_dir_info",
         WEKO_ITEMS_UI_EXPORT_TMP_PREFIX="weko_export_",
         WEKO_SEARCH_UI_IMPORT_TMP_PREFIX="weko_import_",
-        WEKO_AUTHORS_SEARCH_INDEX_NAME="{}-authors".format(index_prefix),
+        WEKO_AUTHORS_SEARCH_INDEX_NAME=resource_prefix + "-authors",
         WEKO_HANDLE_ALLOW_REGISTER_CNRI=False,
         WEKO_PERMISSION_ROLE_USER=[
             "System Administrator",
@@ -642,7 +693,7 @@ def base_app(instance_path, search_class, request):
                 pid_value="1.0",
                 search_class=RecordsSearch,
                 # search_index=SEARCH_UI_SEARCH_INDEX,
-                search_index="weko",
+                search_index=resource_prefix + "-weko",
                 search_type="item-v1.0.0",
                 search_factory_imp="weko_search_ui.query.weko_search_factory",
                 # record_class='',
@@ -714,24 +765,28 @@ def base_app(instance_path, search_class, request):
         WEKO_EXPORT_TEMPLATE_BASIC_NAME=WEKO_EXPORT_TEMPLATE_BASIC_NAME,
         WEKO_EXPORT_TEMPLATE_BASIC_OPTION=WEKO_EXPORT_TEMPLATE_BASIC_OPTION,
     )
+    search_index = app_.config["SEARCH_UI_SEARCH_INDEX"]
+    app_.config["RECORDS_REST_SORT_OPTIONS"][search_index] = (
+        app_.config["RECORDS_REST_SORT_OPTIONS"].pop("weko"))
     app_.url_map.converters["pid"] = PIDConverter
     app_.config["RECORDS_REST_ENDPOINTS"]["recid"]["search_class"] = search_class
+    app_.config["RECORDS_REST_ENDPOINTS"]["recid"]["search_index"] = search_class.Meta.index
 
     # Parameterize application.
     if hasattr(request, "param"):
         if "endpoint" in request.param:
-            app.config["RECORDS_REST_ENDPOINTS"]["recid"].update(
+            app_.config["RECORDS_REST_ENDPOINTS"]["recid"].update(
                 request.param["endpoint"]
             )
         if "records_rest_endpoints" in request.param:
-            original_endpoint = app.config["RECORDS_REST_ENDPOINTS"]["recid"]
-            del app.config["RECORDS_REST_ENDPOINTS"]["recid"]
+            original_endpoint = app_.config["RECORDS_REST_ENDPOINTS"]["recid"]
+            del app_.config["RECORDS_REST_ENDPOINTS"]["recid"]
             for new_endpoint_prefix, new_endpoint_value in request.param[
                 "records_rest_endpoints"
             ].items():
                 new_endpoint = dict(original_endpoint)
                 new_endpoint.update(new_endpoint_value)
-                app.config["RECORDS_REST_ENDPOINTS"][new_endpoint_prefix] = new_endpoint
+                app_.config["RECORDS_REST_ENDPOINTS"][new_endpoint_prefix] = new_endpoint
 
     FlaskCeleryExt(app_)
     Menu(app_)
@@ -787,10 +842,21 @@ def base_app(instance_path, search_class, request):
 
 
 @pytest.yield_fixture()
-def app(base_app):
+def app(base_app, resource_prefix):
     """Flask application fixture."""
     with base_app.app_context():
-        yield base_app
+        try:
+            yield base_app
+        finally:
+            client = current_search_client._get_current_object()
+            try:
+                indices = client.indices.get(
+                    index=resource_prefix + "-*", allow_no_indices=True,
+                    ignore_unavailable=True)
+                for index_name in indices:
+                    client.indices.delete(index=index_name)
+            finally:
+                client.close()
 
 
 @pytest.yield_fixture()
@@ -798,11 +864,13 @@ def db(app):
     """Get setup database."""
     if not database_exists(str(db_.engine.url)):
         create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
-    drop_alembic_version_table()
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.drop_all()
+        drop_alembic_version_table()
 
 
 @pytest.yield_fixture()
@@ -1159,55 +1227,40 @@ def indices2(app, db):
 
 
 @pytest.fixture()
-def search_index(app, db_records):
-    current_search_client.indices.delete(index="test-*")
-    with open("tests/data/item-v1.0.0.json", "r") as f:
-        mapping = json.load(f)
+def item_search_index(app):
+    index_name = app.config["INDEXER_DEFAULT_INDEX"]
+    mapping = json_data("data/item-v1.0.0.json")
+    client = current_search_client._get_current_object()
     try:
-        current_search_client.indices.create(
-            app.config["INDEXER_DEFAULT_INDEX"], body=mapping
-        )
-        current_search_client.indices.put_alias(
-            index=app.config["INDEXER_DEFAULT_INDEX"], name="test-weko"
-        )
-    except:
-        current_search_client.indices.create("test-weko-items", body=mapping)
-        current_search_client.indices.put_alias(
-            index="test-weko-items", name="test-weko"
-        )
-    # print(current_search_client.indices.get_alias())
+        client.indices.create(index=index_name, body=mapping)
+        for alias in (app.config["SEARCH_UI_SEARCH_INDEX"],
+                      app.config["RECORDS_REST_DEFAULT_SEARCH_INDEX"]):
+            client.indices.put_alias(index=index_name, name=alias)
+        yield client
+    finally:
+        client.indices.delete(index=index_name, ignore=[404])
 
+
+@pytest.fixture()
+def search_index(app, db_records, item_search_index):
     for depid, recid, parent, doi, record, item in db_records:
-        current_search_client.index(
-            index="test-weko-item-v1.0.0",
+        item_search_index.index(
+            index=app.config["INDEXER_DEFAULT_INDEX"],
             id=record.id,
             body=record,
             refresh="true",
         )
-
-    try:
-        yield current_search_client
-    finally:
-        current_search_client.indices.delete(index="test-*")
+    yield item_search_index
 
 
 @pytest.fixture()
 def es_authors_index(app):
-    current_search_client.indices.delete(index="test-*")
-
+    index_name = app.config["WEKO_AUTHORS_SEARCH_INDEX_NAME"]
     try:
-        index_name = "test-authors"
-        current_search_client.indices.create(
-            index_name
-        )
-
-    except Exception:
-        pass
-
-    try:
+        current_search_client.indices.create(index=index_name)
         yield current_search_client
     finally:
-        current_search_client.indices.delete(index=index_name)
+        current_search_client.indices.delete(index=index_name, ignore=[404])
 
 
 @pytest.fixture()
@@ -2335,7 +2388,7 @@ def test_importdata():
 def mocker_itemtype(mocker):
     item_type = Mock()
     filepath = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "item_type/15_render.json"
+        os.path.dirname(os.path.realpath(__file__)), "item_type/15_full_render.json"
     )
     with open(filepath, encoding="utf-8") as f:
         render = json.load(f)
@@ -2376,6 +2429,21 @@ def record_with_metadata():
 def record_restricted():
     return json_data("data/list_records/list_records_restricted.json")
 
+
+@pytest.fixture()
+def registered_restricted_records(record_restricted, db_workflow, users):
+    workflow_id = db_workflow["workflow"].id
+    role_id = users[1]["obj"].roles[0].id
+    for item in record_restricted:
+        for metadata in item["metadata"].get("item_1685583796047", []):
+            for provide in metadata.get("provide", []):
+                if provide.get("workflow") == 1:
+                    provide["workflow"] = workflow_id
+                if provide.get("role") == 3:
+                    provide["role"] = role_id
+    return record_restricted
+
+
 @pytest.fixture()
 def terms(db):
     """ admin_settings table """
@@ -2412,7 +2480,7 @@ def deposit(app, open_search, users, location, db):
     with app.test_request_context():
         datastore = app.extensions["security"].datastore
         login_user(datastore.find_user(email=users[0]["email"]))
-        deposit = Deposit.create(record)
+        deposit = Deposit.create(record, with_bucket=True)
         deposit.commit()
         db.session.commit()
     sleep(2)
@@ -2471,7 +2539,7 @@ def db_index(client, users, user_activity_log_partition_table):
 
 
 @pytest.fixture()
-def search_records(app, db, db_index, location, db_itemtype, db_oaischema):
+def search_records(app, db, db_index, location, db_itemtype, db_oaischema, item_search_index):
     indexer = WekoIndexer()
     indexer.get_search_index()
     results = []
@@ -2710,7 +2778,7 @@ def search_records(app, db, db_index, location, db_itemtype, db_oaischema):
     return {"indexer": indexer, "results": results}
 
 @pytest.fixture()
-def search_records2(app, db, db_index, location, db_itemtype, db_oaischema):
+def search_records2(app, db, db_index, location, db_itemtype, db_oaischema, item_search_index):
     indexer = WekoIndexer()
     indexer.get_search_index()
     results = []
@@ -2990,7 +3058,7 @@ def indextree(app, client, users, user_activity_log_partition_table):
 
 
 @pytest.fixture()
-def doi_records(app, db, identifier, indextree, location, db_itemtype, db_oaischema):
+def doi_records(app, db, identifier, indextree, location, db_itemtype, db_oaischema, item_search_index):
     indexer = WekoIndexer()
     indexer.get_search_index()
     results = []
@@ -3041,37 +3109,41 @@ def doi_records(app, db, identifier, indextree, location, db_itemtype, db_oaisch
 
 
 @pytest.fixture()
-def search_item_file_pipeline(open_search):
+def search_item_file_pipeline(app, open_search, resource_prefix):
     from opensearchpy.client.ingest import IngestClient
 
     p = IngestClient(current_search_client)
-    p.put_pipeline(
-        id="item-file-pipeline",
-        body={
-            "description": "Index contents of each file.",
-            "processors": [
-                {
-                    "foreach": {
-                        "field": "content",
-                        "processor": {
-                            "attachment": {
-                                "indexed_chars": -1,
-                                "target_field": "_ingest._value.attachment",
-                                "field": "_ingest._value.file",
-                                "properties": ["content"],
-                            }
-                        },
-                    }
-                },
-                {
-                    "foreach": {
-                        "field": "content",
-                        "processor": {"remove": {"field": "_ingest._value.file"}},
-                    }
-                },
-            ],
-        },
-    )
+    try:
+        p.put_pipeline(
+            id=resource_prefix + "-item-file-pipeline",
+            body={
+                "description": "Index contents of each file.",
+                "processors": [
+                    {
+                        "foreach": {
+                            "field": "content",
+                            "processor": {
+                                "attachment": {
+                                    "indexed_chars": -1,
+                                    "target_field": "_ingest._value.attachment",
+                                    "field": "_ingest._value.file",
+                                    "properties": ["content"],
+                                }
+                            },
+                        }
+                    },
+                    {
+                        "foreach": {
+                            "field": "content",
+                            "processor": {"remove": {"field": "_ingest._value.file"}},
+                        }
+                    },
+                ],
+            },
+        )
+        yield
+    finally:
+        p.delete_pipeline(id=resource_prefix + "-item-file-pipeline", ignore=[404])
 
 
 @pytest.fixture()
@@ -3144,21 +3216,9 @@ def record_indexer_receiver(app, json=None, record=None, index=None,
 
 
 @pytest.fixture
-def open_search(app):
-    """OpenSearch fixture."""
-    try:
-        # delete alias to avoid "Invalid alias name [test-*] is already used as a concrete index" error
-        current_search_client.indices.delete_alias(
-            name="test-*", index="weko-*", ignore=[404, 400]
-        )
-        current_search_client.indices.delete(index="test-*")
-        current_search.create()
-    except RequestError:
-        current_search.delete(ignore=[404])
-        current_search.create(ignore=[400])
-    current_search_client.indices.refresh()
-    yield current_search_client
-    current_search.delete(ignore=[404])
+def open_search(item_search_index):
+    """Share the app-owned item index with all search consumers."""
+    yield item_search_index
 
 
 @pytest.yield_fixture()
@@ -4751,11 +4811,15 @@ def db_rocrate_mapping(db):
 @pytest.yield_fixture()
 def ro_crate():
     temp_dir = tempfile.mkdtemp()
-    zip_path = os.path.join(temp_dir, "crate.zip")
-    bagify("tests/data/zip_crate/", checksums=["sha256"])
-    shutil.make_archive(zip_path.replace(".zip", ""), 'zip', "tests/data/zip_crate/")
-    yield zip_path
-    shutil.rmtree(temp_dir)
+    try:
+        crate_path = os.path.join(temp_dir, "crate")
+        shutil.copytree("tests/data/zip_crate", crate_path)
+        zip_path = os.path.join(temp_dir, "crate.zip")
+        bagify(crate_path, checksums=["sha256"])
+        shutil.make_archive(zip_path.replace(".zip", ""), 'zip', crate_path)
+        yield zip_path
+    finally:
+        shutil.rmtree(temp_dir)
 
 
 @pytest.fixture
