@@ -38,6 +38,7 @@ from weko_authors.models import AuthorsPrefixSettings, AuthorsAffiliationSetting
 from weko_records.api import ItemsMetadata, JsonldMapping, WekoRecord
 from weko_records.models import ItemType
 from weko_redis.redis import RedisConnection
+from weko_index_tree.models import Index
 from weko_search_ui.config import (
     ACCESS_RIGHT_TYPE_URI,
     RESOURCE_TYPE_URI,
@@ -335,7 +336,8 @@ def test_get_tree_items(i18n_app, indices, users, mocker, search_index):
 
 
 # def delete_records(index_tree_id, ignore_items):
-def test_delete_records(i18n_app, db_activity):
+def test_delete_records(i18n_app, db_activity, mocker):
+    mock_soft_delete = mocker.patch("weko_records_ui.utils.soft_delete")
     with open("tests/data/search_result_2.json", "r") as json_file:
         search_result = json.load(json_file)
 
@@ -357,6 +359,8 @@ def test_delete_records(i18n_app, db_activity):
                         ):
                             assert delete_records(33, ignore_items=[])
                             assert delete_records(1, ignore_items=[])
+                            mock_soft_delete.assert_called_once_with(
+                                search_result["_source"]["control_number"])
 
 
 # def get_journal_info(index_id=0):
@@ -676,6 +680,7 @@ def test_unpackage_import_file(app, db,mocker, mocker_itemtype):
     with open(filepath, encoding="utf-8") as f:
         item_type_mapping = json.load(f)
     mocker.patch("weko_records.serializers.utils.get_mapping", return_value=item_map)
+    mocker.patch("weko_search_ui.utils.get_mapping", return_value=item_map)
     mocker.patch("weko_records.api.Mapping.get_record", return_value=item_type_mapping)
 
     filepath = os.path.join(
@@ -1243,6 +1248,8 @@ def test_handle_check_exist_record(app, db):
 
     with app.test_request_context():
         with force_locale("en"):
+            for expected in result:
+                expected["uri"] = request.host_url + "records/" + str(expected["id"])
             case.assertCountEqual(handle_check_exist_record(list_record), result)
 
     # case 3 import items with id and uri
@@ -1499,9 +1506,19 @@ def test_register_item_metadata(
     root_path = os.path.dirname(os.path.abspath(__file__))
     item["$schema"] = "/items/jsonschema/1000"
     item["item_type_id"] = 1000
+    update_spy = mocker.spy(WekoDeposit, "update")
+    publish_spy = mocker.spy(WekoDeposit, "publish_without_commit")
+    expected_title = copy.deepcopy(item["metadata"]["item_1617186331708"])
+    expected_path = list(item["metadata"]["path"])
     mock_commit = mocker.patch('weko_deposit.api.WekoDeposit.commit', return_value=None)
     with patch("invenio_files_rest.utils.find_and_update_location_size"):
-        assert register_item_metadata(item, root_path, -1, is_gakuninrdm=False)
+        register_item_metadata(item, root_path, -1, is_gakuninrdm=False)
+        mock_commit.assert_called()
+        publish_spy.assert_called()
+        update_call = update_spy.call_args_list[0]
+        assert update_call.args[1] == {"index": expected_path, "actions": "publish"}
+        assert update_call.args[2]["item_1617186331708"] == expected_title
+        assert update_call.args[2]["$schema"] == "/items/jsonschema/1000"
 
 
 # .tox/c1/bin/pytest --cov=weko_search_ui tests/test_utils.py::test_register_item_metadata2 -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-search-ui/.tox/c1/tmp
@@ -1979,7 +1996,6 @@ def test_handle_check_and_prepare_index_tree2(i18n_app, record_with_metadata, in
 # def handle_check_and_prepare_feedback_mail(list_record):
 # .tox/c1/bin/pytest --cov=weko_search_ui tests/test_utils.py::test_handle_check_and_prepare_feedback_mail -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-search-ui/.tox/c1/tmp
 def test_handle_check_and_prepare_feedback_mail(i18n_app, record_with_metadata, es_authors_index):
-    i18n_app.config["WEKO_AUTHORS_SEARCH_INDEX_NAME"] = "test-authors"
     list_record = [record_with_metadata[0]]
 
     # Doesn't return any value
@@ -2001,7 +2017,6 @@ def test_handle_check_and_prepare_feedback_mail(i18n_app, record_with_metadata, 
 # def handle_check_and_prepare_request_mail(list_record):
 # .tox/c1/bin/pytest --cov=weko_search_ui tests/test_utils.py::test_handle_check_and_prepare_request_mail -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-search-ui/.tox/c1/tmp
 def test_handle_check_and_prepare_request_mail(i18n_app, record_with_metadata, es_authors_index):
-    i18n_app.config["WEKO_AUTHORS_SEARCH_INDEX_NAME"] = "test-authors"
     list_record = [record_with_metadata[0]]
 
     # Doesn't return any value
@@ -3776,7 +3791,7 @@ def test_handle_fill_system_item(app, test_list_records,identifier, mocker):
 # @pytest.mark.skip("Run time is too long and all tests failed.")
 def test_handle_fill_system_item3(app,doi_records, mocker_itemtype, item_id,before_doi,after_doi,warnings,errors,is_change_identifier,is_register_cnri, mocker):
     app.config.update(
-        WEKO_HANDLE_ALLOW_REGISTER_CRNI=is_register_cnri
+        WEKO_HANDLE_ALLOW_REGISTER_CNRI=is_register_cnri
     )
     before = {
             "metadata": {
@@ -3825,7 +3840,10 @@ def test_handle_fill_system_item3(app,doi_records, mocker_itemtype, item_id,befo
 
     if before_doi["doi_ra2"] is not None:
         before["metadata"]["item_1617186819068"]=before["metadata"].get("item_1617186819068",{})
-        before["metadata"]["item_1617186819068"]["subitem_identifier_reg_type"]= "{}".format(before_doi['doi_ra2'])
+        before["metadata"]["item_1617186819068"]["subitem_identifier_reg_type"] = (
+            "JaLC" if before_doi["doi_ra2"] == "NDL JaLC"
+            else "{}".format(before_doi["doi_ra2"])
+        )
 
     if before_doi["doi2"] is not None:
         before["metadata"]["item_1617186819068"]=before["metadata"].get("item_1617186819068",{})
@@ -3887,7 +3905,10 @@ def test_handle_fill_system_item3(app,doi_records, mocker_itemtype, item_id,befo
 
     if after_doi["doi_ra2"] is not None:
         after["metadata"]["item_1617186819068"]=after["metadata"].get("item_1617186819068",{})
-        after["metadata"]["item_1617186819068"]["subitem_identifier_reg_type"]= "{}".format(after_doi['doi_ra2'])
+        after["metadata"]["item_1617186819068"]["subitem_identifier_reg_type"] = (
+            "JaLC" if after_doi["doi_ra2"] == "NDL JaLC"
+            else "{}".format(after_doi["doi_ra2"])
+        )
 
     if after_doi["doi2"] is not None:
         after["metadata"]["item_1617186819068"]= after["metadata"].get("item_1617186819068",{})
@@ -4173,7 +4194,7 @@ def test_export_all(db_activity, i18n_app, users, item_type, db_records2, redis_
                 task = MagicMock()
                 task.task_id = 1
                 mocker.patch("weko_search_ui.tasks.write_files_task", return_value=task)
-                mocker.patch('builtins.open', side_effect=unittest.mock.mock_open())
+                mocker.patch('weko_search_ui.utils.open', side_effect=unittest.mock.mock_open(), create=True)
                 mocker.patch("weko_search_ui.utils.pickle.dump")
 
                 # datastore.put(uri_key, "testuri".encode('utf-8'))
@@ -4210,7 +4231,8 @@ def test_export_all(db_activity, i18n_app, users, item_type, db_records2, redis_
                     with patch("weko_search_ui.utils.get_record_ids", return_value={}):
                         export_all(root_url, user_id, data, start_time_str)
 
-                    with patch("builtins.open", side_effect=SQLAlchemyError("Test SQLAlchemyError")):
+                    with patch("weko_search_ui.utils.open",
+                               side_effect=SQLAlchemyError("Test SQLAlchemyError"), create=True):
                         export_all(root_url, user_id, data, start_time_str)
 
                     with patch("weko_search_ui.tasks.write_files_task.apply_async", return_value=None):
@@ -4435,7 +4457,7 @@ def test_write_files(db_activity, i18n_app, users, redis_connect, mocker, item_t
         }
 
         mocker.patch("weko_search_ui.utils.os.makedirs")
-        mocker.patch('builtins.open', side_effect=unittest.mock.mock_open())
+        mocker.patch('weko_search_ui.utils.open', side_effect=unittest.mock.mock_open(), create=True)
         now = datetime.now()
         mocker_datetime = mocker.patch('weko_search_ui.utils.datetime')
         mocker_datetime.now.return_value = now
@@ -4694,7 +4716,8 @@ def test_get_export_status(i18n_app, users, redis_connect,mocker, location):
         mocker_datetime.now.return_value = now
         mocker.patch('weko_search_ui.utils.bagit.make_bag')
         mocker.patch('weko_search_ui.utils.shutil.make_archive')
-        mocker.patch("builtins.open", mock_open(read_data=b"data"))
+        mocker.patch("weko_search_ui.utils.open", mock_open(read_data=b"data"), create=True)
+        mock_remove = mocker.patch("weko_search_ui.utils.os.remove")
         mocker.patch("weko_search_ui.utils.FileInstance.create", return_value=MagicMock(uri="test_uri"))
         mocker.patch("weko_search_ui.utils.Location.get_default", return_value=MagicMock(uri="test_location"))
         task = MagicMock()
@@ -4711,6 +4734,7 @@ def test_get_export_status(i18n_app, users, redis_connect,mocker, location):
             }
             assert result == (False, uri.decode(), "test_msg", "test_run_msg", "SUCCESS", start_time_str, now.strftime('%Y/%m/%d %H:%M:%S'))
             assert TempDirInfo().get(export_path) == temp_cache_test
+            mock_remove.assert_called_with(export_path + ".zip")
             TempDirInfo().delete(export_path)
         # os.path.isdir is True
         with patch("weko_search_ui.utils.os.path.isdir", return_value=True):
@@ -4719,7 +4743,7 @@ def test_get_export_status(i18n_app, users, redis_connect,mocker, location):
             file_json['export_path'] = 'tests/data/import'
             mocker.patch('weko_search_ui.utils.bagit.make_bag')
             mocker.patch('weko_search_ui.utils.shutil.make_archive')
-            mocker.patch("builtins.open", mock_open(read_data=b"data"))
+            mocker.patch("weko_search_ui.utils.open", mock_open(read_data=b"data"), create=True)
             mocker.patch("weko_search_ui.utils.FileInstance.create", return_value=MagicMock(uri="test_uri"))
             mocker.patch("weko_search_ui.utils.Location.get_default", return_value=MagicMock(uri="test_location"))
             datastore.put(file_msg, json.dumps(file_json).encode('utf-8'), ttl_secs=30)
@@ -4852,7 +4876,8 @@ def test_handle_check_file_metadata(i18n_app, record_with_metadata):
 
 # def handle_check_restricted_access_property(list_record)
 # .tox/c1/bin/pytest --cov=weko_search_ui tests/test_utils.py::test_handle_check_restricted_access_property_en -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/weko-search-ui/.tox/c1/tmp
-def test_handle_check_restricted_access_property_en(app, db, users, record_restricted, terms, db_itemtype_restricted_access, db_workflow):
+def test_handle_check_restricted_access_property_en(app, db, users, registered_restricted_records, terms, db_itemtype_restricted_access, db_workflow):
+    record_restricted = registered_restricted_records
     # 利用規約(terms)が設定されていない。提供(provide)が設定されていない。
     list_record = [record_restricted[0]]
     handle_check_restricted_access_property(list_record)
@@ -4906,7 +4931,8 @@ def test_handle_check_restricted_access_property_en(app, db, users, record_restr
 
 # def handle_check_restricted_access_property(list_record)
 # .tox/c1/bin/pytest --cov=weko_search_ui tests/test_utils.py::test_handle_check_restricted_access_property_ja -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/weko-search-ui/.tox/c1/tmp
-def test_handle_check_restricted_access_property_ja(app, db, users, record_restricted, terms, db_itemtype_restricted_access, db_workflow):
+def test_handle_check_restricted_access_property_ja(app, db, users, registered_restricted_records, terms, db_itemtype_restricted_access, db_workflow):
+    record_restricted = registered_restricted_records
     restricted_access_json ={
             "key": "168065611041",
             "content": {
@@ -4979,7 +5005,8 @@ def test_check_terms_in_system(terms, record_restricted):
 
 # def check_provide_in_system(key, item_index, item, provides)
 # .tox/c1/bin/pytest --cov=weko_search_ui tests/test_utils.py::test_check_provide_in_system -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/weko-search-ui/.tox/c1/tmp
-def test_check_provide_in_system(users, db_workflow, record_restricted):
+def test_check_provide_in_system(users, db_workflow, registered_restricted_records):
+    record_restricted = registered_restricted_records
     # "provide": [ {"workflow: システムに存在するワークフローID"},{"role", システムに存在するロールID} ]
     # 引数のprovides= itemに設定したprovideを設定する。
     key = "item_1685583796047"
@@ -5257,6 +5284,11 @@ def test_function_issue34535(db,db_index,db_itemtype,location,db_oaischema,mocke
     mocker.patch("weko_search_ui.utils.find_and_update_location_size")
     mocker.patch("weko_deposit.tasks.extract_pdf_and_update_file_contents.apply_async")
     mocker.patch("invenio_records.api.before_record_update.send")
+    public_index = Index.query.get(1)
+    public_index.public_state = True
+    public_index.harvest_public_state = True
+    db.session.commit()
+    upload_spy = mocker.spy(WekoIndexer, "upload_metadata")
     # register item
     indexer = WekoIndexer()
     indexer.get_search_index()
@@ -5277,9 +5309,19 @@ def test_function_issue34535(db,db_index,db_itemtype,location,db_oaischema,mocke
         object_uuid=rec_uuid,
         status=PIDStatus.REGISTERED,
     )
+    parent = PersistentIdentifier.create(
+        "parent", "parent:4", object_type="rec", object_uuid=rec_uuid,
+        status=PIDStatus.REGISTERED)
+    PIDRelation.create(parent, recid, 2, 0)
     rel = PIDRelation.create(recid, depid, 3)
     db.session.add(rel)
+    record_data["control_number"] = "4"
     record = WekoRecord.create(record_data, id_=rec_uuid)
+    from invenio_files_rest.models import Bucket
+    from invenio_records_files.models import RecordsBuckets
+    bucket = Bucket.create()
+    RecordsBuckets.create(record=record.model, bucket=bucket)
+    record["_buckets"]["deposit"] = str(bucket.id)
     item = ItemsMetadata.create(item_data, id_=rec_uuid)
     deposit = WekoDeposit(record, record.model)
     deposit.commit()
@@ -5289,9 +5331,14 @@ def test_function_issue34535(db,db_index,db_itemtype,location,db_oaischema,mocke
     root_path = os.path.dirname(os.path.abspath(__file__))
     new_item = {'$schema': 'https://192.168.56.103/items/jsonschema/1000', 'edit_mode': 'Keep', 'errors': None, 'file_path': [''], 'filenames': [{'filename': '', 'id': '.metadata.item_1617605131499[0].filename'}], 'id': '4', 'identifier_key': 'item_1617186819068', 'is_change_identifier': False, 'item_title': 'test item in br', 'item_type_id': 1000, 'item_type_name': 'デフォルトアイテムタイプ（フル）', 'metadata': {'item_1617186331708': [{'subitem_1551255647225': 'test item in br', 'subitem_1551255648112': 'ja'}], 'item_1617186626617': [{'subitem_description': 'this is line1.<br/>this is line2.', 'subitem_description_language': 'en', 'subitem_description_type': 'Abstract'}], 'item_1617258105262': {'resourcetype': 'conference paper', 'resourceuri': 'http://purl.org/coar/resource_type/c_5794'}, 'path': [1], 'pubdate': '2022-11-21'}, 'pos_index': ['Faculty of Humanities and Social Sciences'], 'publish_status': 'public', 'status': 'keep', 'uri': 'https://192.168.56.103/records/4', 'warnings': [], 'root_path': root_path}
 
-    register_item_metadata(new_item,root_path,True)
+    register_item_metadata(new_item,root_path,1)
     record = WekoDeposit.get_record(recid.object_uuid)
-    assert record == {'_oai': {'id': 'oai:weko3.example.org:00000004', 'sets': ['1']}, 'path': ['1'], 'owner': 1, 'recid': '4', 'title': ['test item in br'], 'pubdate': {'attribute_name': 'PubDate', 'attribute_value': '2022-11-21'}, '_buckets': {'deposit': '0796e490-6dcf-4e7d-b241-d7201c3de83a'}, '_deposit': {'id': '4', 'pid': {'type': 'depid', 'value': '4', 'revision_id': 0}, 'owner': 1, 'owners': [1], 'status': 'draft', 'created_by': 1}, 'item_title': 'test item in br', 'author_link': [], 'item_type_id': '1000', 'publish_date': '2022-11-21', 'publish_status': '0', 'weko_shared_ids': [], 'item_1617186331708': {'attribute_name': 'Title', 'attribute_value_mlt': [{'subitem_1551255647225': 'test item in br', 'subitem_1551255648112': 'ja'}]}, 'item_1617186626617': {'attribute_name': 'Description', 'attribute_value_mlt': [{'subitem_description': 'this is line1.\nthis is line2.', 'subitem_description_language': 'en', 'subitem_description_type': 'Abstract'}]}, 'item_1617258105262': {'attribute_name': 'Resource Type', 'attribute_value_mlt': [{'resourcetype': 'conference paper', 'resourceuri': 'http://purl.org/coar/resource_type/c_5794'}]}, 'relation_version_is_last': True, 'control_number': '4'}
+    assert record.files.bucket.id != bucket.id
+    assert record == {'_oai': {'id': 'oai:weko3.example.org:00000004', 'sets': []}, 'path': ['1'], 'owner': 1, 'recid': '4', 'title': ['test item in br'], 'pubdate': {'attribute_name': 'PubDate', 'attribute_value': '2022-11-21'}, '_buckets': {'deposit': str(record.files.bucket.id)}, '_deposit': {'id': '4', 'pid': {'type': 'depid', 'value': '4', 'revision_id': 0}, 'owner': 1, 'owners': [1], 'status': 'published', 'created_by': 1, 'weko_shared_ids': []}, 'item_title': 'test item in br', 'author_link': [], 'item_type_id': '1000', 'publish_date': '2022-11-21', 'publish_status': '0', 'weko_shared_ids': [], 'item_1617186331708': {'attribute_name': 'Title', 'attribute_value_mlt': [{'subitem_1551255647225': 'test item in br', 'subitem_1551255648112': 'ja'}]}, 'item_1617186626617': {'attribute_name': 'Description', 'attribute_value_mlt': [{'subitem_description': 'this is line1.\nthis is line2.', 'subitem_description_language': 'en', 'subitem_description_type': 'Abstract'}]}, 'item_1617258105262': {'attribute_name': 'Resource Type', 'attribute_value_mlt': [{'resourcetype': 'conference paper', 'resourceuri': 'http://purl.org/coar/resource_type/c_5794'}]}, 'relation_version_is_last': True, 'owners': [1]}
+    assert any(
+        str(call.args[2]) == str(record.id)
+        and call.args[1].get("_oai", {}).get("sets") == ["1"]
+        for call in upload_spy.call_args_list)
 
 # .tox/c1/bin/pytest --cov=weko_search_ui tests/test_utils.py::test_function_issue34958 -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-search-ui/.tox/c1/tmp
 def test_function_issue34958(app, make_itemtype):
@@ -5549,7 +5596,7 @@ def test_conbine_aggs():
     assert test == result
 
     not_agg = {"took": "215","time_out": False,"_shards": { "total": "1", "successful": "1", "skipped": "0", "failed": "0" },"hits": { "total": {"value": 0, "relation": "eq"}, "max_score": None, "hits": [] }}
-    test = {'took': '215', 'time_out': False, '_shards': {'total': '1', 'successful': '1', 'skipped': '0', 'failed': '0'}, 'hits': {'total': '0', 'max_score': None, 'hits': []}}
+    test = {'took': '215', 'time_out': False, '_shards': {'total': '1', 'successful': '1', 'skipped': '0', 'failed': '0'}, 'hits': {'total': {'value': 0, 'relation': 'eq'}, 'max_score': None, 'hits': []}}
     result = combine_aggs(not_agg)
     assert test == result
 

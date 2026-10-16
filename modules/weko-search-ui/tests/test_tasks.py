@@ -301,7 +301,7 @@ def test_write_files_task(redis_connect, users, mocker):
         return MockOpen(path, encoding)
 
     with patch('flask_login.utils._get_user', return_value=users[3]['obj']):
-        mocker.patch('builtins.open', side_effect=mock_open)
+        mocker.patch('weko_search_ui.tasks.open', side_effect=mock_open, create=True)
         mock_remove=mocker.patch('weko_search_ui.tasks.os.remove')
         current_app.config["WEKO_ADMIN_CACHE_PREFIX"]="test_cache_prefix_{name}_{user_id}_"
         msg_key = current_app.config['WEKO_ADMIN_CACHE_PREFIX'].format(

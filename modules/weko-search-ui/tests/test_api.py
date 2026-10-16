@@ -217,6 +217,7 @@ def test_get_search_detail_keyword_fix52136(i18n_app, users, db, redis_connect):
         harvest_public_state=False,
         public_state=True,
         browsing_role="3,-99",
+        browsing_group="-89",
     )
     db.session.add(index1)
     index2 = Index(# public_state is True
@@ -227,6 +228,7 @@ def test_get_search_detail_keyword_fix52136(i18n_app, users, db, redis_connect):
         harvest_public_state=True,
         public_state=True,
         browsing_role="3,-99",
+        browsing_group="-89",
     )
     db.session.add(index2)
     index3 = Index(# public_state is False
@@ -237,6 +239,7 @@ def test_get_search_detail_keyword_fix52136(i18n_app, users, db, redis_connect):
         harvest_public_state=True,
         public_state=False,
         browsing_role="3",
+        browsing_group="-89",
     )
     db.session.add(index3)
     index4 = Index(# parent is private
@@ -247,6 +250,7 @@ def test_get_search_detail_keyword_fix52136(i18n_app, users, db, redis_connect):
         harvest_public_state=True,
         public_state=True,
         browsing_role="3,-99",
+        browsing_group="-89",
     )
     db.session.add(index4)
     index5 = Index(# parent is public
@@ -257,29 +261,35 @@ def test_get_search_detail_keyword_fix52136(i18n_app, users, db, redis_connect):
         harvest_public_state=True,
         public_state=True,
         browsing_role="3,-99",
+        browsing_group="-89",
     )
     db.session.add(index5)
     db.session.commit()
 
     with patch.dict("os.environ", {"INVENIO_WEB_HOST_NAME": "test"}):
-        with patch("flask_login.utils._get_user", return_value=users[3]["obj"]):
+        cache_keys = ("index_tree_view_test_ja", "index_reset_tree_view_test_ja")
+        for cache_key in cache_keys:
+            redis_connect.delete(cache_key)
+        try:
+            with patch("flask_login.utils._get_user", return_value=users[3]["obj"]):
+                result = get_search_detail_keyword("str")
+                assert isinstance(result, str)
+                result = json.loads(result)
+                assert len((result).get("condition_setting")) > 0
+                for k_v in result.get("condition_setting"):
+                    if k_v.get("id") == "iid":
+                        assert len(k_v["check_val"]) == 5
+
             result = get_search_detail_keyword("str")
             assert isinstance(result, str)
             result = json.loads(result)
             assert len((result).get("condition_setting")) > 0
             for k_v in result.get("condition_setting"):
                 if k_v.get("id") == "iid":
-                    assert len(k_v["check_val"]) == 5
-
-        result = get_search_detail_keyword("str")
-        assert isinstance(result, str)
-        result = json.loads(result)
-        assert len((result).get("condition_setting")) > 0
-        for k_v in result.get("condition_setting"):
-            if k_v.get("id") == "iid":
-                assert len(k_v["check_val"]) == 3
-        redis_connect.delete("index_tree_view_test_ja")
-        redis_connect.delete("index_reset_tree_view_test_ja")
+                    assert len(k_v["check_val"]) == 3
+        finally:
+            for cache_key in cache_keys:
+                redis_connect.delete(cache_key)
 
 # def get_childinfo(index_tree, result_list=[], parename=""):
 def test_get_childinfo(i18n_app, users):

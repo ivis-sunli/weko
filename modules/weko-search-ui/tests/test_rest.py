@@ -111,7 +111,7 @@ def test_IndexSearchResource_get(client_rest, users, item_type, db_records, face
 # .tox/c1/bin/pytest --cov=weko_search_ui tests/test_rest.py::test_IndexSearchResource_get_Exception -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-search-ui/.tox/c1/tmp
 def test_IndexSearchResource_get_Exception(i18n_app, client_rest, db, users, item_type, db_records, facet_search_setting):
     i18n_app.config['WEKO_SEARCH_TYPE_INDEX'] = 'index'
-    sname = current_app.config["SERVER_NAME"]
+    sname = current_app.config["SERVER_NAME"].lower()
     #from weko_index_tree.models import Index
     #datas = json_data("data/index.json")
     #indexes = list()
@@ -127,6 +127,7 @@ def test_IndexSearchResource_get_Exception(i18n_app, client_rest, db, users, ite
         dummy=dsl.response.Response(dsl.Search(), data)
         return dummy
     facet = json_data("data/search/facet.json")
+    facet[client_rest.application.config["SEARCH_UI_SEARCH_INDEX"]] = facet.pop("test-weko")
     links = {"self":"?page=1&size=20"}
     for l in links:
         links[l]="http://"+sname+"/index/"+links[l]
@@ -138,6 +139,8 @@ def test_IndexSearchResource_get_Exception(i18n_app, client_rest, db, users, ite
                     result = json.loads(res.get_data(as_text=True))
                     rd = json_data("data/search/rd_result01_02_03_Exception.json")
                     rd["links"] = links
+                    for hit in rd["hits"]["hits"]:
+                        hit["links"]["self"] = "http://" + sname + "/records/" + hit["id"]
                     assert result == rd
 
 # .tox/c1/bin/pytest --cov=weko_search_ui tests/test_rest.py::test_IndexSearchResource_get_MaxResultWindowRESTError -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-search-ui/.tox/c1/tmp
@@ -174,6 +177,7 @@ def test_IndexSearchResource_get_facet(i18n_app,client_rest, db, users, item_typ
     titleFacet={},{},{},{},{},{'Data Language': 'OR', 'Access': 'OR', 'Location': 'OR', 'Time Period(s)': 'AND', 'Topic': 'OR', 'Distributor': 'OR', 'Data Type': 'AND'}
     facets_mapping={'Data Language': 'language', 'Access': 'accessRights', 'Location': 'geoLocation.geoLocationPlace', 'Time Period(s)': 'temporal', 'Topic': 'subject.value', 'Distributor': 'contributor.contributorName', 'Data Type': 'description.value'}
     facet = json_data("data/search/facet_02.json")
+    facet[client_rest.application.config["SEARCH_UI_SEARCH_INDEX"]] = facet.pop("test-weko")
     with patch("weko_admin.utils.get_facet_search_query", return_value=facet):
         with patch("weko_search_ui.rest.Indexes.get_self_list",side_effect=mock_path(**path1)):
             with patch("weko_admin.utils.get_title_facets", return_value=titleFacet):
@@ -448,7 +452,7 @@ def test_IndexSearchResourceAPI(client_rest, db_register2, db_rocrate_mapping):
         mock_search_factory.return_value = (search, '')
         with patch('weko_search_ui.rest.get_facet_search_query') as mock_get_facet_search_query:
             search.aggs = {}
-            mock_get_facet_search_query.return_value = {"weko": {"aggs": {"Data Type": {"filter": {}} }}}
+            mock_get_facet_search_query.return_value = {client_rest.application.config["SEARCH_UI_SEARCH_INDEX"]: {"aggs": {"Data Type": {"filter": {}} }}}
             res = client_rest.get(target_url)
             assert res.status_code == 200
             assert search.aggs == {'Data Type': {'filter': {}}}

@@ -32,9 +32,9 @@ def test_version():
     assert __version__
 
 
-def test_init(app):
+def test_init(instance_path):
     """Test extension initialization."""
-    # app = Flask('testapp')
+    app = Flask("testapp", instance_path=instance_path)
     ext = WekoSearchUI(app)
     assert "weko-search-ui" in app.extensions
 

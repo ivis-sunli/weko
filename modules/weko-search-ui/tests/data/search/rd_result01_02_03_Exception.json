@@ -83,15 +83,15 @@
             "buckets": [
                 []
             ],
-            "doc_count_error_upper_bound": 0,
-            "sum_other_doc_count": 0
+            "doc_count_error_upper_bound": "0",
+            "sum_order_doc_count": "0"
         }
     },
     "hits": {
         "hits": [
             {
                 "created": "2022-05-24T08:28:07.807702+00:00",
-                "id": 1,
+                "id": "1",
                 "links": {
                     "self": "http://localhost:8443/records/1"
                 },
@@ -162,11 +162,6 @@
                                         {
                                             "familyName": "Joho",
                                             "familyNameLang": "en"
-                                        }
-                                    ],
-                                    "creatorMails": [
-                                        {
-                                            "creatorMail": "wekosoftware@nii.ac.jp"
                                         }
                                     ],
                                     "creatorNames": [
@@ -251,11 +246,6 @@
                                             "familyNameLang": "en"
                                         }
                                     ],
-                                    "creatorMails": [
-                                        {
-                                            "creatorMail": "wekosoftware@nii.ac.jp"
-                                        }
-                                    ],
                                     "creatorNames": [
                                         {
                                             "creatorName": "情報, 次郎",
@@ -314,11 +304,6 @@
                                         {
                                             "familyName": "Joho",
                                             "familyNameLang": "en"
-                                        }
-                                    ],
-                                    "creatorMails": [
-                                        {
-                                            "creatorMail": "wekosoftware@nii.ac.jp"
                                         }
                                     ],
                                     "creatorNames": [
@@ -666,11 +651,6 @@
                                             "nameIdentifier": "xxxxxxx",
                                             "nameIdentifierURI": "https://kaken.nii.ac.jp/",
                                             "nameIdentifierScheme": "KAKEN2"
-                                        }
-                                    ],
-                                    "contributorMails": [
-                                        {
-                                            "contributorMail": "wekosoftware@nii.ac.jp"
                                         }
                                     ],
                                     "contributorNames": [
@@ -891,7 +871,7 @@
             },
             {
                 "created": "2022-05-24T08:28:07.807702+00:00",
-                "id": 2,
+                "id": "2",
                 "links": {
                     "self": "http://localhost:8443/records/2"
                 },
@@ -962,11 +942,6 @@
                                         {
                                             "familyName": "Joho",
                                             "familyNameLang": "en"
-                                        }
-                                    ],
-                                    "creatorMails": [
-                                        {
-                                            "creatorMail": "wekosoftware@nii.ac.jp"
                                         }
                                     ],
                                     "creatorNames": [
@@ -1051,11 +1026,6 @@
                                             "familyNameLang": "en"
                                         }
                                     ],
-                                    "creatorMails": [
-                                        {
-                                            "creatorMail": "wekosoftware@nii.ac.jp"
-                                        }
-                                    ],
                                     "creatorNames": [
                                         {
                                             "creatorName": "情報, 次郎",
@@ -1114,11 +1084,6 @@
                                         {
                                             "familyName": "Joho",
                                             "familyNameLang": "en"
-                                        }
-                                    ],
-                                    "creatorMails": [
-                                        {
-                                            "creatorMail": "wekosoftware@nii.ac.jp"
                                         }
                                     ],
                                     "creatorNames": [
@@ -1466,11 +1431,6 @@
                                             "nameIdentifier": "xxxxxxx",
                                             "nameIdentifierURI": "https://kaken.nii.ac.jp/",
                                             "nameIdentifierScheme": "KAKEN2"
-                                        }
-                                    ],
-                                    "contributorMails": [
-                                        {
-                                            "contributorMail": "wekosoftware@nii.ac.jp"
                                         }
                                     ],
                                     "contributorNames": [
@@ -1689,7 +1649,7 @@
             },
             {
                 "created": "2022-05-24T08:28:07.807702+00:00",
-                "id": 3,
+                "id": "3",
                 "links": {
                     "self": "http://localhost:8443/records/3"
                 },
@@ -1760,11 +1720,6 @@
                                         {
                                             "familyName": "Joho",
                                             "familyNameLang": "en"
-                                        }
-                                    ],
-                                    "creatorMails": [
-                                        {
-                                            "creatorMail": "wekosoftware@nii.ac.jp"
                                         }
                                     ],
                                     "creatorNames": [
@@ -1849,11 +1804,6 @@
                                             "familyNameLang": "en"
                                         }
                                     ],
-                                    "creatorMails": [
-                                        {
-                                            "creatorMail": "wekosoftware@nii.ac.jp"
-                                        }
-                                    ],
                                     "creatorNames": [
                                         {
                                             "creatorName": "情報, 次郎",
@@ -1912,11 +1862,6 @@
                                         {
                                             "familyName": "Joho",
                                             "familyNameLang": "en"
-                                        }
-                                    ],
-                                    "creatorMails": [
-                                        {
-                                            "creatorMail": "wekosoftware@nii.ac.jp"
                                         }
                                     ],
                                     "creatorNames": [
@@ -2266,11 +2211,6 @@
                                             "nameIdentifierScheme": "KAKEN2"
                                         }
                                     ],
-                                    "contributorMails": [
-                                        {
-                                            "contributorMail": "wekosoftware@nii.ac.jp"
-                                        }
-                                    ],
                                     "contributorNames": [
                                         {
                                             "lang": "ja",
@@ -2486,10 +2426,7 @@
                 "updated": "2022-05-24T08:32:26.405052+00:00"
             }
         ],
-        "total": {
-            "value": 3,
-            "relation": "eq"
-        }
+        "total": 3
     },
     "links": {}
 }
