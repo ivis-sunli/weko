@@ -37,7 +37,7 @@ cchardet==2.2.0a2
 celery==5.5.3
 certifi>=2024.8.30
 cffi==1.16.0
-chardet>=5.2.0
+chardet==5.2.0
 charset-normalizer==3.3.2
 citeproc-py==0.5.1
 citeproc-py-styles==0.1.3
