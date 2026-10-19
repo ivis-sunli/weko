@@ -36,7 +36,7 @@ from invenio_access import InvenioAccess
 from invenio_access.models import ActionUsers, ActionRoles
 from invenio_admin import InvenioAdmin
 from invenio_assets import InvenioAssets
-from invenio_cache import InvenioCache
+from invenio_cache import InvenioCache, current_cache
 from invenio_communities.models import Community
 from invenio_communities.views.ui import blueprint as invenio_communities_blueprint
 from invenio_deposit.config import (
@@ -88,12 +88,13 @@ from mock import Mock, patch
 from os.path import join
 from simplekv.memory.redisstore import RedisStore
 from sqlalchemy import event
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 from sqlalchemy_utils.functions import (
-    create_database, database_exists, drop_database)
+    create_database, drop_database)
 from tests.helpers import create_record, json_data
 
+from weko_accounts.config import WEKO_ACCOUNTS_GAKUNIN_GROUP_PATTERN_DICT
 from weko_admin.ext import WekoAdmin
 from weko_items_ui.ext import WekoItemsUI
 from weko_schema_ui.models import OAIServerSchema
@@ -135,6 +136,18 @@ from werkzeug.local import LocalProxy
 
 
 @pytest.fixture(scope='session')
+def database_uri():
+    """Own a disposable database instead of touching the configured database."""
+    uri = make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+        database='weko_theme_ut_' + uuid.uuid4().hex)
+    create_database(uri)
+    try:
+        yield str(uri)
+    finally:
+        drop_database(uri)
+
+
+@pytest.fixture(scope='session')
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
@@ -166,12 +179,14 @@ class MockManifestLoader(JinjaManifestLoader):
 
 
 @pytest.fixture(scope='session')
-def base_app(instance_path):
+def base_app(instance_path, database_uri):
     """Flask application fixture."""
     app_ = Flask('testapp', instance_path=instance_path, static_folder=join(instance_path, "static"),)
     os.environ['INVENIO_WEB_HOST_NAME']="127.0.0.1"
+    search_prefix = 'weko-theme-ut-' + uuid.uuid4().hex + '-'
     app_.config.update(
         ACCOUNTS_JWT_ENABLE=True,
+        WEKO_ACCOUNTS_GAKUNIN_GROUP_PATTERN_DICT=WEKO_ACCOUNTS_GAKUNIN_GROUP_PATTERN_DICT,
         SECRET_KEY='SECRET_KEY',
         WEKO_INDEX_TREE_UPDATED=True,
         TESTING=True,
@@ -185,7 +200,7 @@ def base_app(instance_path):
         THEME_ICONS={},
         CACHE_REDIS_URL=os.environ.get("CACHE_REDIS_URL", "redis://redis:6379/0"),
         CACHE_REDIS_DB='0',
-        CACHE_REDIS_HOST="redis",
+        CACHE_REDIS_HOST=os.environ["CACHE_REDIS_HOST"],
         WEKO_INDEX_TREE_STATE_PREFIX="index_tree_expand_state",
         REDIS_PORT='6379',
         DEPOSIT_DEFAULT_JSONSCHEMA=DEPOSIT_DEFAULT_JSONSCHEMA,
@@ -193,11 +208,10 @@ def base_app(instance_path):
         LOGIN_DISABLED=False,
         INDEXER_FILE_DOC_TYPE='content',
         INDEXER_DEFAULT_INDEX="{}-weko-item-v1.0.0".format(
-            'test'
+            search_prefix.rstrip('-')
         ),
         INDEX_IMG='indextree/36466818-image.jpg',
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_uri,
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #     'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
         SEARCH_HOSTS=os.environ.get(
@@ -219,9 +233,9 @@ def base_app(instance_path):
         DEPOSIT_DEFAULT_STORAGE_CLASS=DEPOSIT_DEFAULT_STORAGE_CLASS,
         RECORDS_REST_SORT_OPTIONS=RECORDS_REST_SORT_OPTIONS,
         # SEARCH_UI_SEARCH_INDEX=SEARCH_UI_SEARCH_INDEX,
-        SEARCH_UI_SEARCH_INDEX="test-weko",
+        SEARCH_UI_SEARCH_INDEX=search_prefix + "weko",
         # SEARCH_OPENSEARCH_HOSTS=os.environ.get("INVENIO_ELASTICSEARCH_HOST"),
-        SEARCH_INDEX_PREFIX="{}-".format('test'),
+        SEARCH_INDEX_PREFIX=search_prefix,
         SEARCH_CLIENT_CONFIG={"http_auth":(os.environ['INVENIO_OPENSEARCH_USER'],os.environ['INVENIO_OPENSEARCH_PASS']),"use_ssl":True, "verify_certs":False},
         OAISERVER_ID_PREFIX="oai:inveniosoftware.org:recid/",
         OAISERVER_RECORD_INDEX="_all",
@@ -546,10 +560,11 @@ def base_app(instance_path):
     current_assets.collect.collect()
 
     # install node_modules
-    current_path = os.getcwd()
-    os.chdir(instance_path+'/static')
-    assert subprocess.call('npm install bootstrap-sass@3.3.5 font-awesome@4.4.0 angular@1.4.9 angular-gettext angular-loading-bar@0.9.0 bootstrap-datepicker@1.7.1 almond@0.3.1 jquery@1.9.1 d3@3.5.17 invenio-search-js@1.3.1', shell=True) == 0
-    os.chdir(current_path)
+    assert subprocess.call(
+        'npm install bootstrap-sass@3.3.5 font-awesome@4.4.0 angular@1.4.9 '
+        'angular-gettext angular-loading-bar@0.9.0 bootstrap-datepicker@1.7.1 '
+        'almond@0.3.1 jquery@1.9.1 d3@3.5.17 invenio-search-js@1.3.1',
+        shell=True, cwd=instance_path+'/static') == 0
 
     scss_dir = join(instance_path, app_.config['WEKO_THEME_INSTANCE_DATA_DIR'])
     os.makedirs(scss_dir, exist_ok=True)
@@ -567,16 +582,32 @@ def app(base_app):
         yield base_app
 
 
+def clear_index_tree_cache(app):
+    """Remove the exact tree caches owned by this test application."""
+    connection = RedisConnection().connection(db=app.config['CACHE_REDIS_DB'])
+    try:
+        for language, name in app.config['I18N_LANGUAGES']:
+            current_cache.delete('index_tree_json' + language)
+            connection.delete(
+                'index_tree_view_' + os.environ['INVENIO_WEB_HOST_NAME'] + '_' + language,
+                'index_reset_tree_view_' + os.environ['INVENIO_WEB_HOST_NAME'] + '_' + language)
+    finally:
+        connection.close()
+
+
 @pytest.fixture()
 def db(app):
     """Get setup database."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
-    drop_alembic_version_table()
+    try:
+        clear_index_tree_cache(app)
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.drop_all()
+        drop_alembic_version_table()
+        db_.engine.dispose()
+        clear_index_tree_cache(app)
 
 
 @pytest.fixture(scope='session')
@@ -820,33 +851,21 @@ def indices(app, db):
 
 @pytest.fixture()
 def search_index(app,db_records):
-    with open("tests/data/mappings/item-v1.0.0.json","r") as f:
+    with open("tests/data/mappings/item-v1.0.0.json", "r") as f:
         mapping = json.load(f)
 
-    search = LocalProxy(lambda: app.extensions["invenio-search"])
-
-    with app.test_request_context():
-        try:
-            search.client.indices.create(app.config["INDEXER_DEFAULT_INDEX"],body=mapping)
-            search.client.indices.put_alias(index=app.config["INDEXER_DEFAULT_INDEX"], name="test-weko")
-        except:
-            search.client.indices.create("test-weko-items",body=mapping)
-            search.client.indices.put_alias(index="test-weko-items", name="test-weko")
-        # print(current_search_client.indices.get_alias())
-
-    for depid, recid, parent, doi, record, item in db_records:
-        search.client.index(index='test-weko-item-v1.0.0', id=record.id, body=record,refresh='true')
-
-
-    yield search
-
-    with app.test_request_context():
-        try:
-            search.client.indices.delete_alias(index=app.config["INDEXER_DEFAULT_INDEX"], name="test-weko")
-            search.client.indices.delete(index=app.config["INDEXER_DEFAULT_INDEX"], ignore=[400, 404])
-        except:
-            search.client.indices.delete_alias(index="test-weko-items", name="test-weko")
-            search.client.indices.delete(index="test-weko-items", ignore=[400, 404])
+    search = app.extensions["invenio-search"]
+    index = app.config["INDEXER_DEFAULT_INDEX"]
+    try:
+        search.client.indices.create(index=index, body=mapping)
+        search.client.indices.put_alias(
+            index=index, name=app.config["SEARCH_UI_SEARCH_INDEX"])
+        for depid, recid, parent, doi, record, item in db_records:
+            search.client.index(index=index, id=record.id, body=record)
+        search.client.indices.refresh(index=index)
+        yield search
+    finally:
+        search.client.indices.delete(index=index, ignore=[404])
 
 
 @pytest.fixture()
@@ -1400,13 +1419,13 @@ def open_search(app):
     Don't create template so that the test or another fixture can modify the
     enabled events.
     """
-    current_search_client.indices.delete(index='test-*')
+    current_search_client.indices.delete(index=app.config['SEARCH_INDEX_PREFIX'] + '*')
     # current_search_client.indices.delete_template('*')
     list(current_search.create())
     try:
         yield current_search_client
     finally:
-        current_search_client.indices.delete(index='test-*')
+        current_search_client.indices.delete(index=app.config['SEARCH_INDEX_PREFIX'] + '*')
         # current_search_client.indices.delete_template('*')
 
 
@@ -1459,7 +1478,7 @@ def generate_events(
         ],
         double_click_window=0
     ).run()
-    current_search_client.indices.refresh(index='test-*')
+    current_search_client.indices.refresh(index=app.config['SEARCH_INDEX_PREFIX'] + '*')
 
 
 @pytest.fixture()
