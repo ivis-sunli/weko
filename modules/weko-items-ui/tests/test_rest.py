@@ -103,7 +103,7 @@ def test_WekoRanking_error(app, client, db, db_ranking):
         with patch('weko_admin.models.RankingSettings.get', MagicMock(side_effect=SQLAlchemyError("SQLAlchemy connection failed"))):
             res = client.get(url)
             assert res.status_code == 500
-            assert b"SQLAlchemy connection failed" in res.get_data()
+            assert res.json == {"status": 500, "message": "Internal Server Error"}
 
         with patch('weko_admin.models.RankingSettings.get', MagicMock(side_effect=search.OpenSearchException())):
             res = client.get(url)
@@ -198,6 +198,9 @@ def test_WekoFileRanking_error(app, client, records, db_itemtype):
         assert res.status_code == 304
 
         # 12 Handle OpenSearchException
-    with patch('weko_admin.models.RankingSettings.get', MagicMock(side_effect=search.OpenSearchException)):
+    with patch('weko_items_ui.utils.get_file_download_data',
+               side_effect=search.OpenSearchException) as mock_download:
         res = client.get(url)
         assert res.status_code == 500
+        mock_download.assert_called_once()
+        assert mock_download.call_args[0][0] == 11

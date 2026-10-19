@@ -55,3 +55,11 @@ def create_record(record_data, item_data):
         item = ItemsMetadata.create(item_data, id_=rec_uuid)
     
     return depid, recid,parent,doi,record, item
+
+
+def normalize_export_options(value):
+    """Compare unordered option flags while retaining all export cells."""
+    headers, records = value
+    keys, labels, systems, options = headers
+    options = [', '.join(sorted(option.split(', '))) for option in options]
+    return [keys, labels, systems, options], records

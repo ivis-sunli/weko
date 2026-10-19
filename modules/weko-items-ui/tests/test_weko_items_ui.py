@@ -66,7 +66,7 @@ def test_init():
 
 def test_view(app,db_sessionlifetime):
     """Test view."""
-    WekoItemsUI(app)
+    assert 'weko-items-ui' in app.extensions
     with app.test_client() as client:
         res = client.get("/items/jsonschema/0")
         assert res.status_code == 302

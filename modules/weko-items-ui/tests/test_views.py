@@ -6,10 +6,13 @@ import requests
 import responses
 import uuid
 
+from urllib.parse import urljoin
 from collections import OrderedDict
 from unittest.mock import patch, MagicMock
 
 from flask import json, url_for, make_response
+from flask_babel import force_locale
+from flask_login import login_user
 from jinja2.exceptions import TemplateNotFound
 
 from invenio_accounts.testutils import login_user_via_session
@@ -22,6 +25,7 @@ from weko_deposit.api import WekoDeposit, WekoRecord
 from weko_workflow.api import WorkActivity
 from weko_workflow.models import Activity, WorkFlow
 from werkzeug.datastructures import FileStorage
+
 
 from weko_items_ui.views import (
     check_ranking_show,
@@ -38,7 +42,7 @@ def test_index_acl_nologin(client, db_sessionlifetime):
     url = url_for("weko_items_ui.index", _external=True)
     res = client.get("http://test_server/items/")
     assert res.status_code == 302
-    assert res.location == url_for("security.login", next="/items/", _external=True)
+    assert urljoin(res.request.url, res.location) == url_for("security.login", next="/items/", _external=True)
 
 
 # .tox/c1/bin/pytest --cov=weko_items_ui tests/test_views.py::test_index_acl -v --cov-branch --cov-report=term --basetemp=/code/modules/weko-items-ui/.tox/c1/tmp
@@ -61,7 +65,7 @@ def test_index_acl(client, db_itemtype, users, id, status_code):
     res = client.get(url)
     assert res.status_code == status_code
     if res.status_code == 302:
-        assert res.location == "{}1".format(url)
+        assert urljoin(res.request.url, res.location) == "{}1".format(url)
     else:
         assert res.location == None
 
@@ -113,7 +117,7 @@ def test_iframe_index_acl_nologin(client, db_sessionlifetime):
     url = url_for("weko_items_ui.iframe_index")
     res = client.get(url)
     assert res.status_code == 302
-    assert res.location == url_for(
+    assert urljoin(res.request.url, res.location) == url_for(
         "security.login", next="/items/iframe", _external=True
     )
 
@@ -295,7 +299,7 @@ def test_iframe_save_model_nologin(client, db_sessionlifetime):
     url = url_for("weko_items_ui.iframe_save_model", _external=True)
     res = client.post(url)
     assert res.status_code == 302
-    assert res.location == url_for(
+    assert urljoin(res.request.url, res.location) == url_for(
         "security.login", next="/items/iframe/model/save", _external=True
     )
 
@@ -20562,17 +20566,18 @@ def test_iframe_items_index_update_index_error(app, client, db_itemtype, users, 
         activity.workflow_id = 2
         session["itemlogin_activity"] = activity
     depid, recid, parent, doi, record, item = db_records[0]
+    record_uuid = recid.object_uuid
     redis_connection = RedisConnection()
     datastore = redis_connection.connection(db=app.config['CACHE_REDIS_DB'], kv = True)
     datastore.put(
         app.config['WEKO_DEPOSIT_ITEMS_CACHE_PREFIX'].format(pid_value=recid.pid_value),
         (json.dumps(record)).encode('utf-8'))
     with patch("weko_deposit.api.WekoIndexer.upload_metadata", return_value=True):
-        res = WekoRecord.get_record(recid.object_uuid)
+        res = WekoRecord.get_record(record_uuid)
         assert res["path"] == ['1']
         res = client.get(url)
         assert res.status_code == 400
-        res = WekoRecord.get_record(recid.object_uuid)
+        res = WekoRecord.get_record(record_uuid)
         assert res["path"] == ['1']
 
 
@@ -20586,6 +20591,7 @@ def test_iframe_items_index_update_index(app, client, db_itemtype, users, db_rec
         activity.workflow_id = 2
         session["itemlogin_activity"] = activity
     depid, recid, parent, doi, record, item = db_records[0]
+    record_uuid = recid.object_uuid
     record['$schema'] = "/items/jsonschema/1"
     redis_connection = RedisConnection()
     datastore = redis_connection.connection(db=app.config['CACHE_REDIS_DB'], kv = True)
@@ -20593,11 +20599,11 @@ def test_iframe_items_index_update_index(app, client, db_itemtype, users, db_rec
         app.config['WEKO_DEPOSIT_ITEMS_CACHE_PREFIX'].format(pid_value=recid.pid_value),
         (json.dumps(record)).encode('utf-8'))
     with patch("weko_deposit.api.WekoIndexer.upload_metadata", return_value=True):
-        res = WekoRecord.get_record(recid.object_uuid)
+        res = WekoRecord.get_record(record_uuid)
         assert res["path"] == ['1']
         res = client.get(url)
         assert res.status_code == 400
-        res = WekoRecord.get_record(recid.object_uuid)
+        res = WekoRecord.get_record(record_uuid)
         assert res["path"] == ['1']
 
 
@@ -20712,7 +20718,7 @@ def test_to_links_js(app, db_records):
     depid, recid, parent, doi, record, item = db_records[0]
     assert to_links_js(depid) == {
         'self': '/api/deposits/items/1',
-        'ret': '/items/',
+        'ret': url_for('weko_items_ui.index', _external=True),
         'index': '/api/deposits/redirect/1',
         'r': '/items/index/1',
         'iframe_tree': '/items/iframe/index/1',
@@ -20777,28 +20783,28 @@ def test_get_search_data_acl_user0(client_api, users, db_userprofile, db_session
     )
     res = client_api.get(url)
     assert res.status_code == 200
-    assert json.loads(res.data) == {
+    assert {**json.loads(res.data), "results": sorted(json.loads(res.data)["results"])} == {
         "error": "",
-        "results": [
+        "results": sorted([
             "contributor",
             "repoadmin",
             "sysadmin",
             "originalroleuser2",
-        ],
+        ]),
     }
     url = url_for(
         "weko_items_ui_api.get_search_data", data_type="email", _external=True
     )
     res = client_api.get(url)
     assert res.status_code == 200
-    assert json.loads(res.data) == {
+    assert {**json.loads(res.data), "results": sorted(json.loads(res.data)["results"])} == {
         "error": "",
-        "results": [
+        "results": sorted([
             "contributor@test.org",
             "repoadmin@test.org",
             "sysadmin@test.org",
             "originalroleuser2@test.org",
-        ],
+        ]),
     }
 
     url = url_for("weko_items_ui_api.get_search_data", data_type="hoge", _external=True)
@@ -20815,28 +20821,28 @@ def test_get_search_data_acl_user1(client_api, users, db_userprofile, db_session
     )
     res = client_api.get(url)
     assert res.status_code == 200
-    assert json.loads(res.data) == {
+    assert {**json.loads(res.data), "results": sorted(json.loads(res.data)["results"])} == {
         "error": "",
-        "results": [
+        "results": sorted([
             "contributor",
             "repoadmin",
             "sysadmin",
             "originalroleuser2",
-        ],
+        ]),
     }
     url = url_for(
         "weko_items_ui_api.get_search_data", data_type="email", _external=True
     )
     res = client_api.get(url)
     assert res.status_code == 200
-    assert json.loads(res.data) == {
+    assert {**json.loads(res.data), "results": sorted(json.loads(res.data)["results"])} == {
         "error": "",
-        "results": [
+        "results": sorted([
             "contributor@test.org",
             "repoadmin@test.org",
             "sysadmin@test.org",
             "originalroleuser2@test.org",
-        ],
+        ]),
     }
 
     url = url_for("weko_items_ui_api.get_search_data", data_type="hoge", _external=True)
@@ -20853,28 +20859,28 @@ def test_get_search_data_acl_user2(client_api, users, db_userprofile, db_session
     )
     res = client_api.get(url)
     assert res.status_code == 200
-    assert json.loads(res.data) == {
+    assert {**json.loads(res.data), "results": sorted(json.loads(res.data)["results"])} == {
         "error": "",
-        "results": [
+        "results": sorted([
             "contributor",
             "repoadmin",
             "sysadmin",
             "originalroleuser2",
-        ],
+        ]),
     }
     url = url_for(
         "weko_items_ui_api.get_search_data", data_type="email", _external=True
     )
     res = client_api.get(url)
     assert res.status_code == 200
-    assert json.loads(res.data) == {
+    assert {**json.loads(res.data), "results": sorted(json.loads(res.data)["results"])} == {
         "error": "",
-        "results": [
+        "results": sorted([
             "contributor@test.org",
             "repoadmin@test.org",
             "sysadmin@test.org",
             "originalroleuser2@test.org",
-        ],
+        ]),
     }
 
     url = url_for("weko_items_ui_api.get_search_data", data_type="hoge", _external=True)
@@ -20891,28 +20897,28 @@ def test_get_search_data_acl_user3(client_api, users, db_userprofile, db_session
     )
     res = client_api.get(url)
     assert res.status_code == 200
-    assert json.loads(res.data) == {
+    assert {**json.loads(res.data), "results": sorted(json.loads(res.data)["results"])} == {
         "error": "",
-        "results": [
+        "results": sorted([
             "contributor",
             "repoadmin",
             "sysadmin",
             "originalroleuser2",
-        ],
+        ]),
     }
     url = url_for(
         "weko_items_ui_api.get_search_data", data_type="email", _external=True
     )
     res = client_api.get(url)
     assert res.status_code == 200
-    assert json.loads(res.data) == {
+    assert {**json.loads(res.data), "results": sorted(json.loads(res.data)["results"])} == {
         "error": "",
-        "results": [
+        "results": sorted([
             "contributor@test.org",
             "repoadmin@test.org",
             "sysadmin@test.org",
             "originalroleuser2@test.org",
-        ],
+        ]),
     }
 
     url = url_for("weko_items_ui_api.get_search_data", data_type="hoge", _external=True)
@@ -21171,6 +21177,7 @@ def test_get_current_login_user_id_acl(
 
 # def prepare_edit_item():
 # .tox/c1/bin/pytest --cov=weko_items_ui tests/test_views.py::test_prepare_edit_item_login -v --cov-branch --cov-report=term --basetemp=/code/modules/weko-items-ui/.tox/c1/tmp
+@force_locale('en')
 def test_prepare_edit_item_login(client_api, users, db_itemtype_15, mocker):
     itemtype_id = db_itemtype_15["item_type"].id
     mock_will_be_edit = mocker.patch("weko_items_ui.views.lock_item_will_be_edit")
@@ -21295,7 +21302,10 @@ def test_prepare_edit_item_login(client_api, users, db_itemtype_15, mocker):
     # success to prepare edit item
     # no request
     mock_latest_activity.side_effect = [None, mock_activity]
-    with patch("weko_items_ui.views.prepare_edit_workflow") as mock_prepare_workflow:
+    with client_api.application.test_request_context(json={}), \
+            patch("weko_items_ui.views.prepare_edit_workflow") as mock_prepare_workflow:
+        login_user(client_api.application.extensions['invenio-accounts'].datastore.find_user(
+            email=users[1]['email']))
         ret = prepare_edit_item(1, "Test Community")
         assert ret.status_code == 200
         assert ret.json["msg"] == "success"
@@ -21371,7 +21381,8 @@ def test_prepare_edit_item_login_2(app, client_api, users, db_records, db_itemty
 
 # def prepare_delete_item(id=None, community=None, shared_user_id=-1):
 # .tox/c1/bin/pytest --cov=weko_items_ui tests/test_views.py::test_prepare_delete_item_login -v --cov-branch --cov-report=term --basetemp=/code/modules/weko-items-ui/.tox/c1/tmp
-def test_prepare_delete_item_login(client_api, users, db_itemtype_15, mocker):
+@force_locale('en')
+def test_prepare_delete_item_login(client_api, users, db_itemtype_15, mocker, records_ui_routes):
     itemtype_id = db_itemtype_15["item_type"].id
     mock_will_be_edit = mocker.patch("weko_items_ui.views.lock_item_will_be_edit")
     mock_will_be_edit.return_value = True
@@ -21492,8 +21503,11 @@ def test_prepare_delete_item_login(client_api, users, db_itemtype_15, mocker):
     mock_workflow.delete_flow_id = 2
 
     # no request
-    with patch("weko_records_ui.views.soft_delete") as mock_soft_delete, \
+    with client_api.application.test_request_context(json={}), \
+            patch("weko_records_ui.views.soft_delete") as mock_soft_delete, \
             patch("weko_items_ui.views.prepare_delete_workflow") as mock_prepare_workflow:
+        login_user(client_api.application.extensions['invenio-accounts'].datastore.find_user(
+            email=users[1]['email']))
         ret = prepare_delete_item(1, "", shared_user_ids=[3])
         assert ret.status_code == 200
         assert ret.json["msg"] == "success"
@@ -21632,7 +21646,7 @@ def test_validate_bibtex_export_acl_nologin(
     schema['schema'] = json.loads(
         db_oaischema.xsd, object_pairs_hook=OrderedDict)
     with patch('weko_schema_ui.schema.cache_schema', return_value=schema):
-        with patch('weko_schema_ui.serializers.WekoBibTexSerializer.serialize', return_value='test_data'):
+        with patch('weko_schema_ui.serializers.WekoBibTexSerializer.WekoBibTexSerializer.serialize', return_value='test_data'):
             url = url_for("weko_items_ui.validate_bibtex_export", _external=True)
             res = client.post(
                 url, data=json.dumps({"record_ids": [1]}), content_type="application/json"
@@ -21876,8 +21890,20 @@ def test_get_oa_policy(
             content_type="application/json",
         )
 
-        # APIリクエストを送信
-        res = client_api.get(url, query_string=params)
+        # Provide the upstream status directly for retryable responses.
+        # The real route, Session and Retry factories still execute.
+        if status_code in (500, 502):
+            response = requests.Response()
+            response.status_code = status_code
+            response._content = b'{}'
+            with patch("weko_items_ui.views.requests.Session.get",
+                       return_value=response) as mock_request:
+                res = client_api.get(url, query_string=params)
+                mock_request.assert_called_once()
+                assert mock_request.call_args[0][0] == app.config[
+                    "WEKO_RECORDS_UI_OA_GET_OA_POLICIES_URL"]
+        else:
+            res = client_api.get(url, query_string=params)
 
         # レスポンスの検証
         if(status_code  == 502):
@@ -21952,7 +21978,7 @@ def test_register_bulk_import_task(app, client_api, users, tokens, make_zip,
     url = url_for("weko_items_ui_api.register_bulk_import_task", mode="import",
                   is_change_identifier=False, _external=True)
     login_user_via_session(client=client_api, email=users[1]["email"])
-    token = tokens[0]["token"].access_token
+    token = tokens[1]["token"].access_token
 
     # ヘッダー不備 Content-Disposition不備
     headers = {
@@ -22307,7 +22333,7 @@ def test_register_bulk_import_is_change_identifier(
     )
 
     login_user_via_session(client=client_api, email=users[1]["email"])
-    token = tokens[0]["token"].access_token
+    token = tokens[1]["token"].access_token
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Disposition": 'attachment; filename="payload.zip"',

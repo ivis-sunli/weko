@@ -13,8 +13,8 @@ from weko_records.utils import json_loader
 # .tox/c1/bin/pytest --cov=weko_items_ui tests/test_tasks.py::test_bulk_post_item_to_researchmap -vv -s --cov-branch --cov-report=html --basetemp=/code/modules/weko_items-ui/.tox/c1/tmp
 def test_bulk_post_item_to_researchmap(app):
     with patch('weko_items_ui.tasks.process_researchmap_queue' , return_value = ""):
-        with patch('weko_items_ui.tasks.current_celery_app' , return_value = MagicMock()):
-            with patch('weko_items_ui.tasks.current_app' , return_value = MagicMock()):
+        with patch('weko_items_ui.tasks.current_celery_app' , new=MagicMock()):
+            with patch('weko_items_ui.tasks.current_app' , new=MagicMock()):
                 message = MagicMock()
                 with patch('weko_items_ui.tasks.Consumer.iterqueue' , return_value = [message, None]):
                         bulk_post_item_to_researchmap()
