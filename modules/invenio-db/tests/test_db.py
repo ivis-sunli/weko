@@ -119,7 +119,7 @@ def test_alembic(db, app,mock_entry_points):
         ext.alembic.downgrade(target="96e796392533")
 
 # .tox/c1/bin/pytest --cov=invenio_db tests/test_db.py::test_naming_convention -vv -s --cov-branch --cov-report=term --cov-report=xml --basetemp=/code/modules/invenio-db/.tox/c1/tmp
-def test_naming_convention(db, app,mock_entry_points):
+def test_naming_convention(db, app,mock_entry_points, request):
     """Test naming convention."""
     from sqlalchemy_continuum import remove_versioning
 
@@ -159,6 +159,16 @@ def test_naming_convention(db, app,mock_entry_points):
 
         return Master, Slave
 
+    def cleanup(database, application, manager):
+        try:
+            if sa.event.contains(sa.engine.Engine, "before_execute",
+                                 manager.track_association_operations):
+                remove_versioning(manager=manager)
+        finally:
+            with application.app_context():
+                database.session.remove()
+                database.engine.dispose()
+
     source_db = shared.SQLAlchemy(
         metadata=shared.MetaData(
             naming_convention={
@@ -181,6 +191,9 @@ def test_naming_convention(db, app,mock_entry_points):
         db=source_db,
         versioning_manager=VersioningManager(),
     )
+
+    request.addfinalizer(lambda: cleanup(
+        source_db, source_app, source_ext.versioning_manager))
 
     with source_app.app_context():
         source_db.metadata.bind = source_db.engine
@@ -211,6 +224,9 @@ def test_naming_convention(db, app,mock_entry_points):
         db=target_db,
         versioning_manager=VersioningManager(),
     )
+
+    request.addfinalizer(lambda: cleanup(
+        target_db, target_app, target_ext.versioning_manager))
 
     with target_app.app_context():
         target_db.metadata.bind = target_db.engine
