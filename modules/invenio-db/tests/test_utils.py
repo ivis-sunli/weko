@@ -80,7 +80,7 @@ def test_versioning_model_classname(db, app):
     idb = InvenioDB(app)
     manager = idb.versioning_manager
     manager.options["use_module_name"] = True
-    assert versioning_model_classname(manager, FooClass) == "Test_UtilsFooClassVersion"
+    assert versioning_model_classname(manager, FooClass) == "TestsTest_UtilsFooClassVersion"
     manager.options["use_module_name"] = False
     assert versioning_model_classname(manager, FooClass) == "FooClassVersion"
     assert versioning_models_registered(manager, db.Model)

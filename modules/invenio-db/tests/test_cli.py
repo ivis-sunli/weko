@@ -5,7 +5,7 @@ from mock import patch
 from flask import current_app
 from werkzeug.local import LocalProxy
 from click.testing import CliRunner
-from sqlalchemy_utils.functions import create_database
+from sqlalchemy_utils.functions import create_database, database_exists
 
 from invenio_db import InvenioDB
 
@@ -71,8 +71,10 @@ def test_init(app,db,script_info, mock_entry_points, mocker):
         init,
         obj=script_info
     )
+    assert result.exit_code == 0, result.output
     assert "Creating database" in result.output
     assert mock_spy.call_count == 1
+    assert database_exists(str(db.engine.url))
     
     # exist db
     runner = CliRunner()
@@ -80,8 +82,10 @@ def test_init(app,db,script_info, mock_entry_points, mocker):
         init,
         obj=script_info
     )
+    assert result.exit_code == 0, result.output
     assert "Creating database" in result.output
     assert mock_spy.call_count == 1
+    assert database_exists(str(db.engine.url))
 
 
 # .tox/c1/bin/pytest --cov=invenio_db tests/test_cli.py::test_destroy -v -vv -s --cov-branch --cov-report=term --cov-report=xml --basetemp=/code/modules/invenio-db/.tox/c1/tmp
@@ -96,6 +100,8 @@ def test_destroy(app,db,script_info,mock_entry_points,mocker):
         ["--yes-i-know"],
         obj=script_info
     )
+    assert result.exit_code == 0, result.output
+    assert not database_exists(str(current_app.config["SQLALCHEMY_DATABASE_URI"]))
     assert "Destroying database" in result.output
     # assert "Sqlite database has not been initialised" in result.output
     assert mock_spy.call_count == 1
@@ -109,10 +115,13 @@ def test_destroy(app,db,script_info,mock_entry_points,mocker):
         ["--yes-i-know"],
         obj=script_info
     )
+    assert result.exit_code == 0, result.output
+    assert not database_exists(str(current_app.config["SQLALCHEMY_DATABASE_URI"]))
     assert "Destroying database" in result.output
-    mock_spy.call_count == 2
+    assert mock_spy.call_count == 2
     
     # _db.engine.name != sqlite
+    create_database(str(_db.engine.url))
     with patch("sqlalchemy.engine.base.Engine.name",return_value="postgres"):
         runner = CliRunner()
         result = runner.invoke(
@@ -120,6 +129,8 @@ def test_destroy(app,db,script_info,mock_entry_points,mocker):
             ["--yes-i-know"],
             obj=script_info
         )
+        assert result.exit_code == 0, result.output
+        assert not database_exists(str(_db.engine.url))
         assert "Destroying database" in result.output
-        mock_spy.call_count == 3
+        assert mock_spy.call_count == 3
     
