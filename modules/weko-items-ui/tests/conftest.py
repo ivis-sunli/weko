@@ -20,6 +20,7 @@
 
 """Pytest configuration."""
 
+import copy
 import json
 import os
 import shutil
@@ -30,7 +31,7 @@ import pytest
 from celery.messaging import establish_connection
 from click.testing import CliRunner
 from datetime import datetime,timedelta
-from flask import Blueprint, Flask
+from flask import Blueprint, Flask, g
 from flask_admin import Admin
 from flask_assets import assets
 from flask_babel import Babel
@@ -68,7 +69,7 @@ from invenio_jsonschemas import InvenioJSONSchemas
 from invenio_pidrelations.models import PIDRelation
 from invenio_pidstore import InvenioPIDStore
 from invenio_pidstore.models import PersistentIdentifier, PIDStatus
-from invenio_pidrelations.config import PIDRELATIONS_RELATION_TYPES
+from weko_deposit.config import PIDRELATIONS_RELATION_TYPES
 from invenio_pidrelations.contrib.versioning import PIDNodeVersioning
 from invenio_pidrelations.contrib.draft import PIDNodeDraft
 from invenio_records import InvenioRecords
@@ -77,7 +78,12 @@ from invenio_stats import InvenioStats
 from io import BytesIO
 from kombu import Exchange, Queue
 from mock import patch
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 from unittest.mock import patch
 from weko_admin import WekoAdmin
 from weko_admin.config import WEKO_ADMIN_DEFAULT_ITEM_EXPORT_SETTINGS
@@ -142,26 +148,102 @@ from zipfile import ZipFile, ZIP_DEFLATED
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 
 @pytest.fixture()
-def base_app(instance_path):
+def isolated_database_uri():
+    """Own a fresh database without touching the configured application DB."""
+    url = make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+        database='weko_items_ui_test_' + uuid.uuid4().hex)
+    uri = url.render_as_string(hide_password=False)
+    assert not database_exists(uri)
+    try:
+        yield uri
+    finally:
+        if database_exists(uri):
+            drop_database(uri)
+
+
+@pytest.fixture()
+def resource_prefix():
+    return 'weko-items-ui-test-' + uuid.uuid4().hex
+
+
+@pytest.fixture()
+def isolated_redis():
+    """Use empty databases on the dedicated test Redis and release owned keys."""
+    from redis import Redis
+    clients = [Redis(host=os.environ['CACHE_REDIS_HOST'], port=6379, db=db)
+               for db in (0, 1, 2)]
+    owned = False
+    try:
+        for client in clients:
+            assert client.dbsize() == 0
+        owned = True
+        yield
+    finally:
+        for client in clients:
+            if owned:
+                keys = list(client.scan_iter())
+                if keys:
+                    client.delete(*keys)
+            client.close()
+
+
+@pytest.fixture()
+def versioning_listeners():
+    """Release this app's global listeners while retaining real versioning."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
+@pytest.fixture()
+def base_app(instance_path, isolated_database_uri, resource_prefix, isolated_redis,
+             versioning_listeners):
     """Flask application fixture."""
     app_ = Flask(
         "testapp",
         instance_path=instance_path,
         static_folder=os.path.join(instance_path, "static"),
     )
+
+    @app_.before_request
+    def clear_request_user():
+        # The outer fixture app context survives requests; login state must not.
+        g.pop('_login_user', None)
+
     app_.config.update(
         SECRET_KEY="SECRET_KEY",
         TESTING=True,
+        BABEL_DEFAULT_LOCALE='en',
         SERVER_NAME="test_server",
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #      'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv(
-            'SQLALCHEMY_DATABASE_URI', 'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=isolated_database_uri,
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
         ACCOUNTS_USERINFO_HEADERS=True,
         WEKO_PERMISSION_SUPER_ROLE_USER=[
@@ -195,7 +277,7 @@ def base_app(instance_path):
         #  WEKO_ITEMS_UI_BASE_TEMPLATE = 'weko_items_ui/base.html',
         #  WEKO_ITEMS_UI_INDEX_TEMPLATE= 'weko_items_ui/item_index.html',
         CACHE_TYPE="redis",
-        CACHE_REDIS_HOST="redis",
+        CACHE_REDIS_HOST=os.environ['CACHE_REDIS_HOST'],
         ACCOUNTS_SESSION_REDIS_DB_NO=1,
         WEKO_SCHEMA_CACHE_PREFIX="cache_{schema_name}",
         REDIS_PORT="6379",
@@ -207,7 +289,7 @@ def base_app(instance_path):
         WEKO_SCHEMA_JPCOAR_V2_NAMEIDSCHEME_REPLACE=WEKO_SCHEMA_JPCOAR_V2_NAMEIDSCHEME_REPLACE,
         SEARCH_OPENSEARCH_HOSTS=os.environ.get('SEARCH_OPENSEARCH_HOSTS', 'opensearch'),
         SEARCH_HOSTS=os.environ.get('SEARCH_HOST', 'opensearch'),
-        SEARCH_INDEX_PREFIX="{}-".format('test'),
+        SEARCH_INDEX_PREFIX='',
         SEARCH_CLIENT_CONFIG={"http_auth":(os.environ['INVENIO_OPENSEARCH_USER'],os.environ['INVENIO_OPENSEARCH_PASS']),"use_ssl":True, "verify_certs":False},
         OAISERVER_ID_PREFIX="oai:inveniosoftware.org:recid/",
         OAISERVER_RECORD_INDEX="_all",
@@ -229,9 +311,7 @@ def base_app(instance_path):
         DEPOSIT_DEFAULT_STORAGE_CLASS=DEPOSIT_DEFAULT_STORAGE_CLASS,
 
         WEKO_RECORDS_UI_LICENSE_DICT=WEKO_RECORDS_UI_LICENSE_DICT,
-        INDEXER_DEFAULT_INDEX="{}-weko-item-v1.0.0".format(
-            'test'
-        ),
+        INDEXER_DEFAULT_INDEX=resource_prefix + '-weko-item-v1.0.0',
         WEKO_INDEX_TREE_REST_ENDPOINTS=WEKO_INDEX_TREE_REST_ENDPOINTS,
         WEKO_ADMIN_DEFAULT_ITEM_EXPORT_SETTINGS=WEKO_ADMIN_DEFAULT_ITEM_EXPORT_SETTINGS,
         FILES_REST_STORAGE_CLASS_LIST=FILES_REST_STORAGE_CLASS_LIST,
@@ -242,7 +322,7 @@ def base_app(instance_path):
         PIDRELATIONS_RELATION_TYPES=PIDRELATIONS_RELATION_TYPES,
         WEKO_USERPROFILES_ROLES=WEKO_USERPROFILES_ROLES,
         EMAIL_DISPLAY_FLG = True,
-        SEARCH_UI_SEARCH_INDEX="test-weko",
+        SEARCH_UI_SEARCH_INDEX=resource_prefix + '-weko',
         WEKO_USERPROFILES_GENERAL_ROLE=WEKO_USERPROFILES_GENERAL_ROLE,
         CACHE_REDIS_DB = 2,
         WEKO_DEPOSIT_ITEMS_CACHE_PREFIX=WEKO_DEPOSIT_ITEMS_CACHE_PREFIX,
@@ -250,7 +330,7 @@ def base_app(instance_path):
         WEKO_INDEX_TREE_DEFAULT_DISPLAY_NUMBER=WEKO_INDEX_TREE_DEFAULT_DISPLAY_NUMBER,
         DEPOSIT_DEFAULT_JSONSCHEMA=DEPOSIT_DEFAULT_JSONSCHEMA,
         DEPOSIT_JSONSCHEMAS_PREFIX=DEPOSIT_JSONSCHEMAS_PREFIX,
-        WEKO_SEARCH_REST_ENDPOINTS=WEKO_SEARCH_REST_ENDPOINTS,
+        WEKO_SEARCH_REST_ENDPOINTS=copy.deepcopy(WEKO_SEARCH_REST_ENDPOINTS),
         INDEXER_MQ_QUEUE = Queue("indexer", exchange=Exchange("indexer", type="direct"), routing_key="indexer",queue_arguments={"x-queue-type":"quorum"}),
         WEKO_IMPORT_DOI_TYPE = ["JaLC", "Crossref", "DataCite", "NDL JaLC"],
         IDENTIFIER_GRANT_LIST = [(0, 'Not Grant', ''),
@@ -261,10 +341,10 @@ def base_app(instance_path):
                          ],
         WEKO_ADMIN_PERMISSION_ROLE_COMMUNITY = "Community Administrator",
         WEKO_ADMIN_PERMISSION_ROLE_REPO = "Repository Administrator",
-        WEKO_AUTHORS_SEARCH_INDEX_NAME='test-authors',
+        WEKO_AUTHORS_SEARCH_INDEX_NAME=resource_prefix + '-authors',
     )
 
-    app_.config['WEKO_SEARCH_REST_ENDPOINTS']['recid']['search_index']='test-weko'
+    app_.config['WEKO_SEARCH_REST_ENDPOINTS']['recid']['search_index'] = app_.config['SEARCH_UI_SEARCH_INDEX']
     app_.config['WEKO_ITEMS_UI_RANKING_DEFAULT_SETTINGS'] = {
     'is_show': True,
     'new_item_period': 14,
@@ -302,7 +382,19 @@ def base_app(instance_path):
     WekoLoggingUserActivity(app_)
 
     current_assets = LocalProxy(lambda: app_.extensions["invenio-assets"])
-    return app_
+    try:
+        yield app_
+    finally:
+        with app_.app_context():
+            from invenio_search import current_search_client
+            client = current_search_client._get_current_object()
+            try:
+                indices = client.indices.get(index=resource_prefix + '-*', ignore=[404])
+                for name in indices:
+                    if name.startswith(resource_prefix + '-'):
+                        client.indices.delete(index=name)
+            finally:
+                client.close()
 
 
 
@@ -319,6 +411,16 @@ def client_api(app):
     with app.test_client() as client:
         yield client
 
+
+@pytest.fixture()
+def records_ui_routes(app):
+    from invenio_records_ui.views import create_blueprint_from_app
+    from weko_records_ui.config import RECORDS_UI_ENDPOINTS
+
+    app.config['RECORDS_UI_ENDPOINTS'] = {
+        'recid': copy.deepcopy(RECORDS_UI_ENDPOINTS['recid'])
+    }
+    app.register_blueprint(create_blueprint_from_app(app))
 
 
 @pytest.yield_fixture()
@@ -339,14 +441,22 @@ def client(app):
 @pytest.fixture()
 def db(app):
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    else:
-        db_.drop_all()
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    uri = app.config['SQLALCHEMY_DATABASE_URI']
+    assert make_url(uri).database.startswith('weko_items_ui_test_')
+    assert not database_exists(uri)
+    create_database(uri)
+    try:
+        db_.create_all()
+        start = datetime.utcnow().date().replace(day=1)
+        end = (start + timedelta(days=31)).replace(day=1)
+        db_.session.execute(
+            "CREATE TABLE user_activity_logs_test PARTITION OF user_activity_logs "
+            "FOR VALUES FROM ('{}') TO ('{}')".format(start, end))
+        db_.session.commit()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
 
 @pytest.fixture()
 def tokens(app,users,db):
@@ -401,7 +511,10 @@ def search_index(app,db_records, open_search):
 @pytest.fixture()
 def redis_connect(app):
     redis_connection = RedisConnection().connection(db=app.config['ACCOUNTS_SESSION_REDIS_DB_NO'], kv = True)
-    return redis_connection
+    try:
+        yield redis_connection
+    finally:
+        redis_connection.redis.close()
 
 @pytest.fixture()
 def without_remove_session(app):
@@ -411,12 +524,9 @@ def without_remove_session(app):
 @pytest.fixture()
 def open_search(app):
     from invenio_search import current_search_client as client
-    client.indices.delete(index="test-*")
     record_index_name = app.config["INDEXER_DEFAULT_INDEX"]
     record_alias_name = app.config["SEARCH_UI_SEARCH_INDEX"]
-    author_index_name = "{}-authors-author-v1.0.0".format(
-            'test'
-        )
+    author_index_name = app.config['WEKO_AUTHORS_SEARCH_INDEX_NAME'] + '-author-v1.0.0'
     author_alias_name = app.config["WEKO_AUTHORS_SEARCH_INDEX_NAME"]
     with open("tests/data/mappings/item-v1.0.0.json","r") as f:
         record_mapping = json.load(f)
@@ -430,7 +540,13 @@ def open_search(app):
 
     yield client
 
-    client.indices.delete(index="test-*")
+    # The application owns and releases its exact UUID-prefixed indices.
+
+
+@pytest.fixture()
+def es(open_search):
+    """Use the same real search resources for file-record consumers."""
+    return open_search
 
 @pytest.fixture()
 def users(app, db):
@@ -690,7 +806,7 @@ def db_userprofile(app, db):
 
 @pytest.fixture()
 def db_itemtype2(app, db):
-    item_type_name = ItemTypeName(id=None,
+    item_type_name = ItemTypeName(id=2,
         name="テストアイテムタイプ2", has_site_license=True, is_active=True
     )
     item_type_schema = dict()
@@ -724,14 +840,16 @@ def db_itemtype2(app, db):
 
     with db.session.begin_nested():
         db.session.add(item_type_name)
+        db.session.flush()
         db.session.add(item_type)
+        db.session.flush()
         db.session.add(item_type_mapping)
 
     return {"item_type_name": item_type_name, "item_type": item_type, "item_type_mapping":item_type_mapping}
 
 @pytest.fixture()
 def db_itemtype3(app, db):
-    item_type_name = ItemTypeName(id=None,
+    item_type_name = ItemTypeName(id=3,
         name="テストアイテムタイプ3", has_site_license=True, is_active=True
     )
     item_type_schema = dict()
@@ -766,14 +884,16 @@ def db_itemtype3(app, db):
 
     with db.session.begin_nested():
         db.session.add(item_type_name)
+        db.session.flush()
         db.session.add(item_type)
+        db.session.flush()
         db.session.add(item_type_mapping)
 
     return {"item_type_name": item_type_name, "item_type": item_type, "item_type_mapping":item_type_mapping}
 
 @pytest.fixture()
 def db_itemtype4(app, db):
-    item_type_name = ItemTypeName(id=None,
+    item_type_name = ItemTypeName(id=4,
         name="テストアイテムタイプ4", has_site_license=True, is_active=True
     )
     item_type_schema = dict()
@@ -808,14 +928,16 @@ def db_itemtype4(app, db):
 
     with db.session.begin_nested():
         db.session.add(item_type_name)
+        db.session.flush()
         db.session.add(item_type)
+        db.session.flush()
         db.session.add(item_type_mapping)
 
     return {"item_type_name": item_type_name, "item_type": item_type, "item_type_mapping":item_type_mapping}
 
 @pytest.fixture()
 def db_itemtype5(app, db):
-    item_type_name = ItemTypeName(id=None,
+    item_type_name = ItemTypeName(id=5,
         name="テストアイテムタイプ5", has_site_license=True, is_active=True
     )
     item_type_schema = dict()
@@ -850,7 +972,9 @@ def db_itemtype5(app, db):
 
     with db.session.begin_nested():
         db.session.add(item_type_name)
+        db.session.flush()
         db.session.add(item_type)
+        db.session.flush()
         db.session.add(item_type_mapping)
 
     return {"item_type_name": item_type_name, "item_type": item_type, "item_type_mapping":item_type_mapping}
@@ -892,7 +1016,9 @@ def db_itemtype6(app, db):
 
     with db.session.begin_nested():
         db.session.add(item_type_name)
+        db.session.flush()
         db.session.add(item_type)
+        db.session.flush()
         db.session.add(item_type_mapping)
 
     return {"item_type_name": item_type_name, "item_type": item_type, "item_type_mapping":item_type_mapping}
@@ -934,14 +1060,16 @@ def db_itemtype6(app, db):
 
     with db.session.begin_nested():
         db.session.add(item_type_name)
+        db.session.flush()
         db.session.add(item_type)
+        db.session.flush()
         db.session.add(item_type_mapping)
 
     return {"item_type_name": item_type_name, "item_type": item_type, "item_type_mapping":item_type_mapping}
 
 @pytest.fixture()
 def db_itemtype(app, db):
-    item_type_name = ItemTypeName(id=None,
+    item_type_name = ItemTypeName(id=1,
         name="テストアイテムタイプ", has_site_license=True, is_active=True
     )
     item_type_schema = dict()
@@ -976,7 +1104,9 @@ def db_itemtype(app, db):
 
     with db.session.begin_nested():
         db.session.add(item_type_name)
+        db.session.flush()
         db.session.add(item_type)
+        db.session.flush()
         db.session.add(item_type_mapping)
 
     return {"item_type_name": item_type_name, "item_type": item_type, "item_type_mapping":item_type_mapping}
@@ -1201,7 +1331,7 @@ def db_workflow(app, db, db_itemtype, users):
     )
     flow_action_role1 = FlowActionRole(
         flow_action_id=1,
-        action_role=1,
+        action_role=Role.query.filter_by(name='System Administrator').one().id,
         action_role_exclude=False,
         action_user=1,
         action_user_exclude=False,
@@ -1209,7 +1339,7 @@ def db_workflow(app, db, db_itemtype, users):
     )
     flow_action_role2 = FlowActionRole(
         flow_action_id=1,
-        action_role=1,
+        action_role=Role.query.filter_by(name='System Administrator').one().id,
         action_role_exclude=False,
         action_user=1,
         action_user_exclude=False,
@@ -22604,7 +22734,9 @@ def db_itemtype_15(app, db):
 
     with db.session.begin_nested():
         db.session.add(item_type_name)
+        db.session.flush()
         db.session.add(item_type)
+        db.session.flush()
         db.session.add(item_type_mapping)
 
     return {"item_type_name": item_type_name, "item_type": item_type, "item_type_mapping":item_type_mapping}
@@ -22623,11 +22755,11 @@ def records(db, es, instance_path):#, indextree, location, itemtypes, db_oaische
 
     results = []
     filepath_list = {
-        "pdf": "../weko-records-ui/tests/data/helloworld.pdf",
-        "docx": "../weko-records-ui/tests/data/helloworld.docx",
-        "zip": "../weko-records-ui/tests/data/helloworld.zip",
-        "txt": "../weko-records-ui/tests/data/helloworld.txt",
-        "jpg": "../weko-records-ui/tests/data/image01.jpg",
+        "pdf": "tests/data/record_file/helloworld.pdf",
+        "docx": "tests/data/record_file/helloworld.docx",
+        "zip": "tests/data/record_file/helloworld.zip",
+        "txt": "tests/data/record_file/helloworld.txt",
+        "jpg": "tests/data/record_file/image01.jpg",
     }
     # with app.test_request_context():
     i = 11
@@ -23402,9 +23534,9 @@ def make_record(db, indexer, i, files, thumbnail=None):
         status=PIDStatus.REGISTERED,
     )
 
-    h1 = PIDNodeVersioning(parent=parent)
-    h1.insert_child(child=recid)
-    h1.insert_child(child=recid_v1)
+    h1 = PIDNodeVersioning(pid=parent)
+    h1.insert_child(child_pid=recid)
+    h1.insert_child(child_pid=recid_v1)
     PIDNodeDraft(pid=recid).insert_child(depid)
     PIDNodeDraft(pid=recid_v1).insert_child(depid_v1)
 
