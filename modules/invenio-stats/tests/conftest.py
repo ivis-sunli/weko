@@ -30,6 +30,7 @@ from invenio_accounts.testutils import create_test_user
 from invenio_accounts.models import Role, User
 from invenio_app.factory import create_api as _create_api
 from invenio_cache import InvenioCache
+from invenio_base.utils import obj_or_import_string
 from invenio_db import db as db_, InvenioDB
 from invenio_files_rest import InvenioFilesREST
 from invenio_files_rest.models import Bucket, Location, ObjectVersion
@@ -62,13 +63,16 @@ from invenio_stats.contrib.event_builders import (
 from invenio_stats.processors import EventsIndexer, anonymize_user
 from invenio_stats.models import StatsEvents, StatsAggregation, StatsBookmark
 from invenio_stats.tasks import aggregate_events, process_events
+from invenio_stats.queues import declare_queues
 from invenio_stats.views import blueprint
 
 from kombu import Exchange, Queue
 from mock import Mock, MagicMock, patch
 from opensearchpy import OpenSearch
+from redis import Redis
 from io import BytesIO
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy.engine.url import make_url
+from sqlalchemy_utils.functions import create_database, drop_database
 from werkzeug.local import LocalProxy
 from .helpers import mock_date, json_data, create_record
 
@@ -181,7 +185,7 @@ def instance_path():
 
 
 @pytest.fixture()
-def event_queues(app):
+def event_queues(app, historical_event_partition):
     """Delete and declare test queues."""
     with app.app_context():
         current_queues.delete()
@@ -211,30 +215,42 @@ def aggregations_config():
     return deepcopy(STATS_AGGREGATIONS)
 
 
+@pytest.fixture(scope="session")
+def isolated_database_uri():
+    uri = make_url(os.environ["SQLALCHEMY_DATABASE_URI"]).set(
+        database="stats_ut_" + uuid.uuid4().hex)
+    create_database(uri)
+    try:
+        yield uri
+    finally:
+        drop_database(uri)
+
+
 @pytest.fixture(scope='function')
-def base_app(instance_path, mock_gethostbyaddr):
+def base_app(instance_path, mock_gethostbyaddr, isolated_database_uri):
     """Flask application fixture without InvenioStats."""
     app_ = Flask('testapp', instance_path=instance_path)
+    index_prefix = 'stats-ut-{}-'.format(uuid.uuid4().hex)
     app_.config.update(dict(
         # CELERY_ALWAYS_EAGER=True,
         always_eager=True,
         # CELERY_TASK_ALWAYS_EAGER=True,
         task_always_eager=True,
         # CELERY_CACHE_BACKEND='memory',
-        cacbe_backend='memory',
+        cache_backend='memory',
         # CELERY_EAGER_PROPAGATES_EXCEPTIONS=True,
         # CELERY_TASK_EAGER_PROPAGATES=True,
         task_eager_propagates=True,
         # CELERY_RESULT_BACKEND='cache',
-        result_backend='cache',
-        CACHE_REDIS_URL="redis://redis:6379/0",
+        result_backend='cache+memory://',
+        CACHE_REDIS_URL=os.environ["CACHE_REDIS_URL"],
         CACHE_REDIS_DB=0,
-        CACHE_REDIS_HOST="redis",
+        CACHE_KEY_PREFIX=index_prefix,
+        CACHE_REDIS_HOST=os.environ["CACHE_REDIS_HOST"],
         BABEL_DEFAULT_TIMEZONE='Asia/Tokyo',
-        QUEUES_BROKER_URL="amqp://guest:guest@rabbitmq:5672//",
+        QUEUES_BROKER_URL=os.environ["QUEUES_BROKER_URL"],
         STATS_WEKO_DEFAULT_TIMEZONE=STATS_WEKO_DEFAULT_TIMEZONE,
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=isolated_database_uri,
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
         STATS_ES_INTEGER_MAX_VALUE=6000,
         TESTING=True,
@@ -242,7 +258,7 @@ def base_app(instance_path, mock_gethostbyaddr):
         OAUTH2SERVER_CLIENT_SECRET_SALT_LEN=60,
         OAUTH2SERVER_TOKEN_PERSONAL_SALT_LEN=60,
         OAUTH2_CACHE_TYPE="simple",
-        SEARCH_INDEX_PREFIX='test-',
+        SEARCH_INDEX_PREFIX=index_prefix,
         STATS_MQ_EXCHANGE=Exchange(
             'test_events',
             type='direct',
@@ -252,15 +268,17 @@ def base_app(instance_path, mock_gethostbyaddr):
         SECRET_KEY='asecretkey',
         SERVER_NAME='localhost',
         PIDRELATIONS_RELATION_TYPES=PIDRELATIONS_RELATION_TYPES,
-        STATS_QUERIES=STATS_QUERIES,
-        STATS_AGGREGATIONS=STATS_AGGREGATIONS,
+        STATS_EVENTS=deepcopy(STATS_EVENTS),
+        STATS_QUERIES=deepcopy(STATS_QUERIES),
+        STATS_AGGREGATIONS=deepcopy(
+            STATS_AGGREGATIONS, {id(current_search_client): current_search_client}),
         OAISERVER_ES_MAX_CLAUSE_COUNT = 3,
         STATS_EXCLUDED_ADDRS=[],
         STATS_EVENT_STRING='events',
         INDEXER_MQ_QUEUE=Queue("indexer", exchange=Exchange(
             "indexer", type="direct"), routing_key="indexer", queue_arguments={"x-queue-type": "quorum"}),
-        INDEXER_DEFAULT_INDEX="{}-weko-item-v1.0.0".format("test"),
-        SEARCH_UI_SEARCH_INDEX="{}-weko-item-v1.0.0".format("test"),
+        INDEXER_DEFAULT_INDEX=index_prefix + "weko-item-v1.0.0",
+        SEARCH_UI_SEARCH_INDEX=index_prefix + "weko-item",
         I18N_LANGUAGES=[('en', 'English'), ('ja', 'Japanese')],
         SEARCH_OPENSEARCH_HOSTS=os.environ.get(
             'SEARCH_OPENSEARCH_HOSTS', 'opensearch'
@@ -290,14 +308,33 @@ def base_app(instance_path, mock_gethostbyaddr):
     InvenioFilesREST(app_)
     InvenioPIDStore(app_)
     InvenioCache(app_)
-    InvenioQueues(app_)
+    InvenioQueues(app_, entry_point_group=None)
     InvenioIndexer(app_)
     InvenioOAuth2Server(app_)
     InvenioOAuth2ServerREST(app_)
     InvenioSearch(app_, entry_point_group=None)
 
     current_stats = LocalProxy(lambda: app_.extensions["invenio-stats"])
-    return app_
+    with app_.app_context():
+        search_client = current_search_client._get_current_object()
+    redis_client = Redis.from_url(os.environ["CACHE_REDIS_URL"])
+    try:
+        yield app_
+    finally:
+        with app_.app_context():
+            db_.session.remove()
+            db_.engine.dispose()
+            indices = search_client.indices.get(
+                index=index_prefix + '*', allow_no_indices=True)
+            for name in indices:
+                search_client.indices.delete(index=name)
+            templates = search_client.indices.get_template(
+                name=index_prefix + '*', ignore=[404])
+            for name in templates:
+                search_client.indices.delete_template(name=name)
+        for key in redis_client.scan_iter(match=index_prefix + '*'):
+            redis_client.delete(key)
+        redis_client.close()
 
 
 @pytest.fixture(scope='function')
@@ -306,21 +343,41 @@ def app(base_app):
     InvenioStats(base_app)
     Babel(base_app)
     with base_app.app_context():
-        return base_app
+        # Select the real stats queue definitions once. tox also installs this
+        # distribution, so source egg-info and dist-info can expose it twice.
+        base_app.config["QUEUES_DEFINITIONS"] = declare_queues()
+        receivers = []
+        for config in base_app.config['STATS_EVENTS'].values():
+            signals = config.get('signal', [])
+            if not isinstance(signals, list):
+                signals = [signals]
+            for signal in signals:
+                signal = obj_or_import_string(signal)
+                receivers.extend((signal, receiver)
+                                 for receiver in signal.receivers_for(base_app))
+        try:
+            yield base_app
+        finally:
+            for signal, receiver in receivers:
+                signal.disconnect(receiver, sender=base_app)
 
 
 @pytest.fixture(scope='function')
 def client(i18n_app):
+    def reload_login_user():
+        g.pop('_login_user', None)
+    i18n_app.before_request_funcs.setdefault(None, []).insert(0, reload_login_user)
     i18n_app.register_blueprint(blueprint, url_prefix="/api/stats")
-    with i18n_app.test_client() as client:
-        return client
+    return i18n_app.test_client()
     
     
 @pytest.fixture(scope='function')
 def client_1(i18n_app_1):
+    def reload_login_user():
+        g.pop('_login_user', None)
+    i18n_app_1.before_request_funcs.setdefault(None, []).insert(0, reload_login_user)
     i18n_app_1.register_blueprint(blueprint, url_prefix="/api/stats")
-    with i18n_app_1.test_client() as client:
-        return client
+    return i18n_app_1.test_client()
 
 
 @pytest.fixture(scope='function')
@@ -448,6 +505,7 @@ def role_users(app, db):
         ds.add_role_to_user(originalroleuser2, originalrole)
         ds.add_role_to_user(originalroleuser2, repoadmin_role)
 
+    db.session.commit()
     return [
         {"email": contributor.email, "id": contributor.id, "obj": contributor},
         {"email": repoadmin.email, "id": repoadmin.id, "obj": repoadmin},
@@ -469,12 +527,13 @@ def role_users(app, db):
 
 
 @pytest.fixture()
-def queries_config(app, custom_permission_factory):
+def queries_config(app, custom_permission_factory, query_entrypoints):
     """Queries config for the tests."""
     stats_queries = deepcopy(STATS_QUERIES)
     # store the original config value
     original_value = app.config.get("STATS_QUERIES")
-    app.config["STATS_QUERIES"] = original_value
+    app.config["STATS_QUERIES"] = query_entrypoints
+    app.extensions["invenio-stats"].__dict__.pop("queries", None)
     # app.config["STATS_QUERIES"] = stats_queries
     yield original_value
     # set the original value back
@@ -515,7 +574,6 @@ def open_search(app):
     enabled events.
     """
     with app.app_context():
-        current_search_client.indices.delete(index='test-*')
         # events
         with open("invenio_stats/contrib/events/os-v2/events-v1.json", "r") as f:
             item_create_mapping = json.load(f)
@@ -543,27 +601,27 @@ def open_search(app):
         try:
             yield current_search_client
         finally:
-            current_search_client.indices.delete(index='test-*')
+            for suffix in ('events-stats-index', 'stats-index'):
+                current_search_client.indices.delete(
+                    index=app.config['SEARCH_INDEX_PREFIX'] + suffix,
+                    ignore=[404])
 
 
 @pytest.fixture(scope='function')
 def db(app):
-    """Database fixture."""
-    with app.app_context():
-        if not database_exists(str(db_.engine.url)):
-            create_database(str(db_.engine.url))
-        db_.create_all()
-        return db_
+    """Create fresh tables inside the application context for each test."""
+    db_.create_all()
+    try:
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.drop_all()
 
 
 @pytest.fixture(scope='function', autouse=True)
-def teardown_db(app):
-    """Teardown the database after each test."""
+def teardown_db(app, db):
+    """Keep implicit database consumers in the same per-test lifecycle."""
     yield
-    with app.app_context():
-        if database_exists(str(db_.engine.url)):
-            db_.session.remove()
-            db_.drop_all()
 
 
 class MockSearch():
@@ -785,7 +843,16 @@ def mock_datetime():
 
 
 @pytest.fixture()
-def mock_event_queue(app, mock_datetime, request_headers, objects, mock_user_ctx):
+def historical_event_partition(db):
+    """Restore the dates used by the existing mock event queue consumers."""
+    db.session.execute("CREATE TABLE stats_events_mock_history PARTITION OF stats_events "
+                       "FOR VALUES FROM ('2000-01-01') TO ('2019-01-01')")
+    db.session.commit()
+
+
+@pytest.fixture()
+def mock_event_queue(app, mock_datetime, request_headers, objects, mock_user_ctx,
+                     historical_event_partition):
     """Create a mock queue containing a few file download events."""
     mock_queue = Mock()
     mock_queue.routing_key = "stats-file-download"
@@ -814,6 +881,20 @@ def mock_search_execute():
     return _dummy_response
 
 
+def create_event_partitions(start_date, end_date):
+    """Restore partitions for the existing generated event date range."""
+    has_history = db_.session.execute(
+        "SELECT to_regclass('stats_events_mock_history')").scalar()
+    for year in range(start_date.year, end_date.year + 1):
+        if has_history and 2000 <= year < 2019:
+            continue
+        db_.session.execute(
+            "CREATE TABLE IF NOT EXISTS stats_events_generated_{0} "
+            "PARTITION OF stats_events FOR VALUES FROM ('{0}-01-01') "
+            "TO ('{1}-01-01')".format(year, year + 1))
+    db_.session.commit()
+
+
 def generate_file_events(
     app,
     event_type,
@@ -824,6 +905,7 @@ def generate_file_events(
     end_date=datetime.date(2022, 10, 7)
 ):
     """Queued events for processing tests."""
+    create_event_partitions(start_date, end_date)
     current_queues.declare()
 
     def _unique_ts_gen():
@@ -846,6 +928,7 @@ def generate_file_events(
                 def build_event(is_robot=False):
                     ts = next(unique_ts)
                     return {
+                        "event_type": event_type,
                         "timestamp": datetime.datetime.combine(
                             entry_date, datetime.time(
                                 minute=ts % 60, second=ts % 60)
@@ -863,7 +946,7 @@ def generate_file_events(
                         "userrole": user_data["role"],
                         "site_license_flag": False,
                         "is_restricted": False,
-                        "user_goup_names": "",
+                        "user_group_list": [],
                         "cur_user_id": user_data["id"],
                         "item_title": "test_item",
                         "remote_addr": "test_remote_addr",
@@ -905,7 +988,7 @@ def generate_file_events(
 def indexed_file_download_events(app, open_search, mock_user_ctx, request):
     """Parametrized pre indexed sample events."""
     generate_file_events(app=app, event_type="file-download", **request.param)
-    current_search_client.indices.flush(index="test-*")
+    current_search_client.indices.refresh(index=app.config["SEARCH_INDEX_PREFIX"] + "*")
     yield
 
 
@@ -917,8 +1000,10 @@ def aggregated_file_download_events(app, open_search, mock_user_ctx, request):
             app=app, event_type="file-download", **request.param)
 
         from datetime import datetime, timezone
-        start_date = datetime(2022, 10, 1).isoformat()
-        end_date = datetime(2022, 10, 30).isoformat()
+        start_date = datetime.combine(request.param['start_date'],
+                                      datetime.min.time()).isoformat()
+        end_date = datetime.combine(request.param['end_date'],
+                                    datetime.max.time()).isoformat()
 
         aggregate_events(
             ["file-download-agg"],
@@ -926,7 +1011,7 @@ def aggregated_file_download_events(app, open_search, mock_user_ctx, request):
             end_date=end_date,
             update_bookmark=False,
             manual=True)
-        current_search_client.indices.flush(index="test-*")
+        current_search_client.indices.refresh(index=app.config["SEARCH_INDEX_PREFIX"] + "*")
         yield
 
 
@@ -947,7 +1032,7 @@ def aggregated_file_preview_events(app, open_search, mock_user_ctx, request):
 
     with patch("invenio_stats.aggregations.datetime", mock_date(*run_date)):
         aggregate_events(["file-preview-agg"])
-    current_search_client.indices.flush(index="test-*")
+    current_search_client.indices.refresh(index=app.config["SEARCH_INDEX_PREFIX"] + "*")
     yield
 
 
@@ -955,6 +1040,7 @@ def aggregated_file_preview_events(app, open_search, mock_user_ctx, request):
 def stats_events_for_db(app, db):
     def base_event(id, event_type):
         return StatsEvents(
+            id=str(id),
             source_id=str(id),
             index="test-events-stats-{}".format(event_type),
             type="stats-{}".format(event_type),
@@ -962,12 +1048,12 @@ def stats_events_for_db(app, db):
             date=datetime.datetime(2023, 1, 1, 1, 0, 0)
         )
 
-    try:
-        with db.session.begin_nested():
-            db.session.add(base_event(1, "top-view"))
-        db.session.commit()
-    except:
-        db.session.rollback()
+    # StatsEvents is partitioned by date; restore the matching fixture partition.
+    db.session.execute("CREATE TABLE stats_events_fixture PARTITION OF stats_events "
+                       "FOR VALUES FROM ('2023-01-01') TO ('2023-01-02')")
+    with db.session.begin_nested():
+        db.session.add(base_event(1, "top-view"))
+    db.session.commit()
 
 
 @pytest.fixture()
@@ -1017,7 +1103,9 @@ def _create_file_download_event(
         "user_id": user_id,
         "remote_addr": remote_addr,
         "unique_session_id": unique_session_id,
-        "event_type": "file-download"
+        "event_type": "file-download",
+        "is_restricted": False,
+        "user_group_list": []
     }
     return build_file_unique_id(doc)
 
@@ -1043,7 +1131,8 @@ def _create_record_view_event(
         "user_id": user_id,
         "remote_addr": remote_addr,
         "unique_session_id": unique_session_id,
-        "event_type": "record-view"
+        "event_type": "record-view",
+        "is_restricted": False
     }
     return build_record_unique_id(doc)
 
@@ -1052,12 +1141,14 @@ def _create_record_view_event(
 def custom_permission_factory(users):
     """Test denying permission factory."""
 
+    authorized_id = users["authorized"].id
+
     def permission_factory(query_name, params, *args, **kwargs):
         permission_factory.query_name = query_name
         permission_factory.params = params
         from flask_login import current_user
 
-        if current_user.is_authenticated and current_user.id == users["authorized"].id:
+        if current_user.is_authenticated and current_user.id == authorized_id:
             return type("Allow", (), {"can": lambda self: True})()
         return type("Deny", (), {"can": lambda self: False})()
 
@@ -1164,6 +1255,7 @@ def generate_events(
     end_date=datetime.date(2017, 1, 7),
 ):
     """Queued events for processing tests."""
+    create_event_partitions(start_date, end_date)
     current_queues.declare()
 
     def _unique_ts_gen():
@@ -1193,6 +1285,11 @@ def generate_events(
                         "file_key": "test.pdf",
                         "size": 9000,
                         "visitor_id": 100,
+                        "remote_addr": "192.168.0.1",
+                        "unique_session_id": entry_date.isoformat(),
+                        "event_type": "file-download",
+                        "is_restricted": False,
+                        "user_group_list": [],
                         "is_robot": is_robot,
                     }
 

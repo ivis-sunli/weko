@@ -41,6 +41,14 @@ def mock_date(*date_parts):
             """Override to return 'current_date'."""
             return cls(*date_parts)
 
+        @classmethod
+        def now(cls, tz=None):
+            """Use the same frozen clock for aggregation and event updates."""
+            value = cls(*date_parts)
+            if tz is not None:
+                value = value.replace(tzinfo=datetime.timezone.utc).astimezone(tz)
+            return value
+
     return MockDate
 
 
