@@ -8,6 +8,8 @@
 
 """CLI tests."""
 
+from invenio_search.utils import prefix_index
+
 import datetime
 
 import pytest
@@ -17,6 +19,7 @@ from invenio_search.engine import dsl
 
 from invenio_stats import current_stats
 from invenio_stats.cli import stats
+from invenio_stats.models import StatsBookmark
 from tests.conftest import _create_file_download_event, _create_record_view_event
 from unittest.mock import patch
 
@@ -58,7 +61,7 @@ def test_events_process(app, open_search, script_info, event_queues):
     )
     assert result.exit_code == 0
 
-    current_search.flush_and_refresh(index="test-*")
+    current_search.flush_and_refresh(index="*")
 
     assert not open_search.indices.exists("events-stats-record-view-2018-01")
     assert not open_search.indices.exists_alias(name="events-stats-record-view")
@@ -68,7 +71,7 @@ def test_events_process(app, open_search, script_info, event_queues):
     )
     assert result.exit_code == 0
 
-    current_search.flush_and_refresh(index="test-*")
+    current_search.flush_and_refresh(index="*")
 
     # Create some more events
     current_stats.publish(
@@ -77,12 +80,12 @@ def test_events_process(app, open_search, script_info, event_queues):
     current_stats.publish(
         "record-view", [_create_record_view_event((2018, 2, 1, 10))])
 
-    current_search.flush_and_refresh(index="test-*")
+    current_search.flush_and_refresh(index="*")
     # Process all event types via a celery task
     result = runner.invoke(stats, ["events", "process"], obj=script_info)
     assert result.exit_code == 0
 
-    current_search.flush_and_refresh(index="test-*")
+    current_search.flush_and_refresh(index="*")
 
 # def _events_delete(event_types, start_date, end_date, force, verbose):
 # def _events_restore(event_types, start_date, end_date, force, verbose):
@@ -117,7 +120,6 @@ def test_events_restore(app, script_info, open_search, db, event_queues):
     from invenio_stats.models import StatsEvents
     from datetime import datetime
     import json
-    import time
 
     with app.app_context():
         runner = CliRunner()
@@ -139,7 +141,7 @@ def test_events_restore(app, script_info, open_search, db, event_queues):
                 "created": "2024-11-28 00:33:09.480608",
                 "updated": "2024-11-28 00:33:09.480612",
                 "_id": "2024-11-28T00:32:30-1277b9fdc34f218e8e1802f30523832c6d0ec86f",
-                "_index": "test-events-stats-index",
+                "_index": prefix_index("events-stats-index"),
                 "_source":{"event_type":"top-view","timestamp":"2024-11-28T00:32:41","unique_id":"d24421df-bc17-3b86-a180-897a9882e667","remote_addr":"192.168.56.1","visitor_id":"48dab7ebc3f8363a70e420ceaec7bc1a6c56c5d5a2fe9c9c1f55da39"},
                 "date": datetime.strptime("2024-11-28 00:32:41", "%Y-%m-%d %H:%M:%S")
             },
@@ -147,7 +149,7 @@ def test_events_restore(app, script_info, open_search, db, event_queues):
                 "created": "2024-11-28 00:35:09.389215",
                 "updated": "2024-11-28 00:35:09.389219",
                 "_id": "2024-11-28T00:34:00-898cf618a0bcadc7eab07ac2a453d705ba92cd78",
-                "_index": "test-events-stats-index",
+                "_index": prefix_index("events-stats-index"),
                 "_source":{"event_type":"file-download","timestamp":"2024-11-28T00:34:12","unique_id":"f8aaa533-bdbd-360c-aaef-39455dabb40e","remote_addr":"192.168.56.1","visitor_id":"48dab7ebc3f8363a70e420ceaec7bc1a6c56c5d5a2fe9c9c1f55da39","file_id":"3f642f8b-433a-447e-9bdd-cf5d867788c4","item_id":"5","file_key":"Test_video.mp4"},
                 "date": datetime.strptime("2024-11-28 00:34:12", "%Y-%m-%d %H:%M:%S")
             }
@@ -158,7 +160,7 @@ def test_events_restore(app, script_info, open_search, db, event_queues):
                 "created": "2024-09-13 09:36:45.524256",
                 "updated": "2024-09-13 09:36:45.524261",
                 "_id": "2024-09-13T09:36:30-b26d305f1c7d2bc280e50df53fe9bd548b9b4251",
-                "_index": "test-events-stats-top-view",
+                "_index": prefix_index("events-stats-top-view"),
                 "type": "stats-top-view",
                 "timestamp": "2024-09-13T09:36:31",
                 "_source": "{\"timestamp\": \"2024-09-13T09:36:31\", \"unique_id\": \"a3a4c4e0-032e-3d08-beee-b4f79681e21c\", \"remote_addr\": \"192.168.56.1\", \"visitor_id\": \"a2c4a00903fce259a64795b27087a6afa7921e8927facdd3011602d9\"}",
@@ -168,7 +170,7 @@ def test_events_restore(app, script_info, open_search, db, event_queues):
                 "created": "2024-11-15 07:01:06.441355",
                 "updated": "2024-11-15 07:01:06.441358",
                 "_id": "2024-11-15T07:00:00-840dab21ad2035be553bce285cca8108154dfb62",
-                "_index": "test-events-stats-file-download",
+                "_index": prefix_index("events-stats-file-download"),
                 "type": "stats-file-download",
                 "timestamp": "2024-11-15T07:00:17",
                 "_source": "{\"timestamp\": \"2024-11-15T07:00:17\", \"unique_id\": \"0327ab05-39cc-38da-8dcf-ed4e26f6eaef\", \"remote_addr\": \"192.168.56.1\", \"visitor_id\": \"66aad2366fc18433f2c279affa6771e8cee2c63aaa0604e163e51901\", \"file_id\": \"55641917-719f-4068-96e8-3f9178fce963\", \"item_id\": \"2000005\", \"file_key\": \"data.zip\"}",
@@ -182,7 +184,7 @@ def test_events_restore(app, script_info, open_search, db, event_queues):
                 data["_source"]=json.loads(data["_source"])
             StatsEvents.save(data, True)
 
-        time.sleep(3)
+        current_search.flush_and_refresh(index="*")
 
         test_cases = [
             # date
@@ -227,9 +229,9 @@ def test_events_restore(app, script_info, open_search, db, event_queues):
             cmd = ["events", "restore"] + case["params"] + ["--force", "--verbose"]
             runner.invoke(stats, cmd, obj=script_info)
 
-            time.sleep(15)
+            current_search.flush_and_refresh(index="*")
 
-            query = dsl.Search(using=open_search, index="test-events-stats-index")
+            query = dsl.Search(using=open_search, index=prefix_index("events-stats-index"))
             res = query.execute()
 
             restored_ids = [hit.meta.id for hit in res]
@@ -243,10 +245,10 @@ def test_events_restore(app, script_info, open_search, db, event_queues):
             delete_cmd = ["events", "delete", "--force", "--verbose", "--yes-i-know"]
             runner.invoke(stats, delete_cmd, obj=script_info)
             
-            time.sleep(5)
+            current_search.flush_and_refresh(index="*")
             
             # delete結果検証
-            query_1 = dsl.Search(using=open_search, index="test-events-stats-index")
+            query_1 = dsl.Search(using=open_search, index=prefix_index("events-stats-index"))
             res_1 = query_1.execute()
             assert res_1.hits.total.value == 0
             
@@ -293,11 +295,11 @@ def test_aggregations_process(script_info, event_queues, open_search, indexed_fi
         ],
         obj=script_info,
     )
-    assert result.exit_code == 1
+    assert result.exit_code == 0
 
-    agg_alias = search_obj.index("stats-file-download")
+    agg_alias = search_obj.index(prefix_index("stats-index")).filter("term", event_type="file-download")
 
-    current_search.flush_and_refresh(index="test-*")
+    current_search.flush_and_refresh(index="*")
 
     # Run again over same period, but update the bookmark
     result = runner.invoke(
@@ -313,9 +315,9 @@ def test_aggregations_process(script_info, event_queues, open_search, indexed_fi
         ],
         obj=script_info,
     )
-    assert result.exit_code == 1
+    assert result.exit_code == 0
 
-    current_search.flush_and_refresh(index="test-*")
+    current_search.flush_and_refresh(index="*")
 
     # Run over all the events via celery task
     with patch("invenio_stats.aggregations.datetime", mock_date(2018, 2, 15)):
@@ -326,13 +328,13 @@ def test_aggregations_process(script_info, event_queues, open_search, indexed_fi
         )
         assert result
 
-    current_search.flush_and_refresh(index="test-*")
+    current_search.flush_and_refresh(index="*")
     assert agg_alias.count() == 46
     assert (
-        search_obj.index("stats-bookmarks").count() == 2
+        StatsBookmark.query.filter_by(source_id="file-download-agg").count() == 2
     )  # This time there are two, since we had two different dates
-    assert search_obj.index("stats-file-download-2018-01").count() == 31
-    assert search_obj.index("stats-file-download-2018-02").count() == 15
+    assert agg_alias.filter("range", timestamp={"gte": "2018-01-01", "lt": "2018-02-01"}).count() == 31
+    assert agg_alias.filter("range", timestamp={"gte": "2018-02-01", "lt": "2018-03-01"}).count() == 15
 
 # def _aggregations_delete(aggregation_types=None, start_date=None, end_date=None):
 # .tox/c1/bin/pytest --cov=invenio_stats tests/test_cli.py::test_aggregations_delete -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/invenio-stats/.tox/c1/tmp
@@ -352,14 +354,14 @@ def test_aggregations_process(script_info, event_queues, open_search, indexed_fi
     indirect=["aggregated_file_download_events"],
 )
 def test_aggregations_delete(
-    db, script_info, event_queues, open_search, aggregated_file_download_events
+    app, db, script_info, event_queues, open_search, aggregated_file_download_events
 ):
     """Test "aggregations process" CLI command."""
     search_obj = dsl.Search(using=open_search)
     runner = CliRunner()
 
-    current_search.flush_and_refresh(index="test-*")
-    agg_alias = search_obj.index("stats-file-download")
+    current_search.flush_and_refresh(index="*")
+    agg_alias = search_obj.index(prefix_index("stats-index")).filter("term", event_type="file-download")
 
     result = runner.invoke(
         stats,
@@ -375,8 +377,8 @@ def test_aggregations_delete(
     )
     assert result
 
-    current_search.flush_and_refresh(index="test-*")
-    agg_alias = search_obj.index("stats-file-download")
+    current_search.flush_and_refresh(index="*")
+    agg_alias = search_obj.index(prefix_index("stats-index")).filter("term", event_type="file-download")
 
     # Delete all aggregations
     result = runner.invoke(
@@ -384,8 +386,8 @@ def test_aggregations_delete(
     )
     assert result
 
-    current_search.flush_and_refresh(index="test-*")
-    agg_alias = search_obj.index("stats-file-download")
+    current_search.flush_and_refresh(index="*")
+    agg_alias = search_obj.index(prefix_index("stats-index")).filter("term", event_type="file-download")
 
 # def _aggregations_list_bookmarks(aggregation_types=None, start_date=None, end_date=None, limit=None):
 # .tox/c1/bin/pytest --cov=invenio_stats tests/test_cli.py::test_aggregations_list_bookmarks -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/invenio-stats/.tox/c1/tmp
@@ -405,18 +407,18 @@ def test_aggregations_delete(
     indirect=["aggregated_file_download_events"],
 )
 def test_aggregations_list_bookmarks(
-    db, script_info, event_queues, open_search, aggregated_file_download_events
+    app, db, script_info, event_queues, open_search, aggregated_file_download_events
 ):
     with app.app_context():
         """Test "aggregations list-bookmarks" CLI command."""
         search_obj = dsl.Search(using=open_search)
         runner = CliRunner()
 
-        current_search.flush_and_refresh(index="test-*")
-        agg_alias = search_obj.index("stats-file-download")
+        current_search.flush_and_refresh(index="*")
+        agg_alias = search_obj.index(prefix_index("stats-index")).filter("term", event_type="file-download")
 
-        bookmarks = [b.date for b in search_obj.index(
-            "stats-bookmarks").scan()]
+        bookmarks = [b.source['date'] for b in StatsBookmark.query.filter_by(
+            source_id='file-download-agg').all()]
 
         result = runner.invoke(
             stats,

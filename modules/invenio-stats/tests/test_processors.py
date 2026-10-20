@@ -8,6 +8,8 @@
 
 """Event processor tests."""
 
+from invenio_search.utils import prefix_index
+
 import logging
 import pytest
 
@@ -364,8 +366,9 @@ def test_events_indexer_id_windowing(app, mock_event_queue):
     assert len(ids) == 3
 
 
-def test_double_clicks(app, mock_event_queue, open_search):
+def test_double_clicks(app, mock_event_queue, open_search, event_queues):
     """Test that events occurring within a time window are counted as 1."""
+    app.config['STATS_EVENTS']['file-download']['params']['double_click_window'] = 10
     event_type = "file-download"
     events = [
         _create_file_download_event(date)
@@ -381,7 +384,7 @@ def test_double_clicks(app, mock_event_queue, open_search):
     process_events(["file-download"])
     current_search.flush_and_refresh(index="*")
     res = open_search.search(
-        index='test-events-stats-file-download-0001',
+        index=prefix_index('events-stats-index'),
     )
     assert res["hits"]["total"]["value"] == 2
 
@@ -512,7 +515,7 @@ def test_events_indexer_actionsiter(app, mock_event_queue, caplog):
     # Check action properties
     for action in actions_with_window:
         assert action['_op_type'] == 'index', "Operation type should be 'index'"
-        assert action['_index'] == "test-events-stats-index", "Index should be 'test-events-stats-index'"
+        assert action['_index'] == prefix_index("events-stats-index"), "Index should be prefix_index('events-stats-index')"
         assert 'file_id' in action['_source'], "Source should contain 'file_id'"
         assert action['_source']['event_type'] == 'file-download', "Event type should match the routing key"
 

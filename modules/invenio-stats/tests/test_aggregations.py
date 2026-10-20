@@ -8,8 +8,9 @@
 
 """Aggregation tests."""
 
+from invenio_search.utils import prefix_index
+
 import datetime
-import json
 import pytest
 import time
 
@@ -23,6 +24,7 @@ from invenio_stats.aggregations import StatAggregator, filter_robots, BookmarkAP
 from invenio_stats.processors import EventsIndexer
 from invenio_stats.tasks import aggregate_events, process_events
 from invenio_stats.models import StatsBookmark
+from invenio_db import db as db_
 from unittest.mock import patch
 
 from .conftest import _create_file_download_event
@@ -105,7 +107,8 @@ def test_overwriting_aggregations(app, open_search, mock_event_queue):
     ]
     # Note that the events use the current time. Let's mock that as well
     with patch("invenio_stats.processors.datetime", mock_date(2017, 6, 2, 11)):
-        indexer = EventsIndexer(mock_event_queue)
+        event_cfg = current_stats.events['file-download']
+        indexer = event_cfg.cls(**{**event_cfg.params, 'queue': mock_event_queue})
         indexer.run()
     current_search.flush_and_refresh(index="*")
 
@@ -116,7 +119,7 @@ def test_overwriting_aggregations(app, open_search, mock_event_queue):
 
     # Send new events, some on the last aggregated day and some far
     # in the future.
-    res = open_search.search(index="stats-file-download", version=True)
+    res = open_search.search(index=prefix_index("stats-index"), version=True)
     for hit in res["hits"]["hits"]:
         if "file_id" in hit["_source"].keys():
             assert hit["_version"] == 1
@@ -126,7 +129,8 @@ def test_overwriting_aggregations(app, open_search, mock_event_queue):
         for date in [(2017, 6, 2, 15), (2017, 7, 1)]  # second event on the same date
     ]
     with patch("invenio_stats.processors.datetime", mock_date(2017, 7, 1, 5)):
-        indexer = EventsIndexer(mock_event_queue)
+        event_cfg = current_stats.events['file-download']
+        indexer = event_cfg.cls(**{**event_cfg.params, 'queue': mock_event_queue})
         indexer.run()
     current_search.flush_and_refresh(index="*")
     # Aggregate again. The aggregation should start from the last bookmark.
@@ -167,7 +171,7 @@ def test_overwriting_aggregations(app, open_search, mock_event_queue):
         ]
     ]
     current_search.flush_and_refresh(index="*")
-    res = open_search.search(index="stats-file-download", version=True)
+    res = open_search.search(index=prefix_index("stats-index"), version=True)
     for hit in res["hits"]["hits"]:
         if hit["_source"]["timestamp"].startswith("2017-06-02"):
             assert hit["_version"] == 2
@@ -187,6 +191,10 @@ def test_aggregation_without_events(app, open_search):
     This scenario happens when celery starts aggregating but no events
     have been created yet.
     """
+    event_index = prefix_index("events-stats-index")
+    mapping = open_search.indices.get_mapping(index=event_index)[event_index]
+    for suffix in ("events-stats-index", "stats-index"):
+        open_search.indices.delete(index=prefix_index(suffix))
     # Aggregate events
     with patch("invenio_stats.aggregations.datetime", mock_date(2017, 9, 9)):
         StatAggregator(
@@ -196,10 +204,10 @@ def test_aggregation_without_events(app, open_search):
             interval="day",
             query_modifiers=[],
         ).run()
-    assert not dsl.Index("stats-file-download", using=open_search).exists()
+    assert not dsl.Index(prefix_index("stats-index"), using=open_search).exists()
     # Create the index but without any event. This happens when the events
     # have been indexed but are not yet searchable (before index refresh).
-    dsl.Index("events-stats-file-download-2017", using=open_search).create()
+    open_search.indices.create(index=event_index, body=mapping)
 
     # Wait for the index to be available
     current_search.flush_and_refresh(index="*")
@@ -213,7 +221,7 @@ def test_aggregation_without_events(app, open_search):
             interval="day",
             query_modifiers=[],
         ).run()
-    assert not dsl.Index("stats-file-download", using=open_search).exists()
+    assert not dsl.Index(prefix_index("stats-index"), using=open_search).exists()
 
 
 def test_bookmark_removal(app, open_search, mock_event_queue):
@@ -227,7 +235,8 @@ def test_bookmark_removal(app, open_search, mock_event_queue):
         for date in [(2017, 6, 2, 15), (2017, 7, 1)]  # second event on the same date
     ]
     indexer = EventsIndexer(mock_event_queue)
-    indexer.run()
+    with patch("invenio_stats.processors.datetime", mock_date(2017, 7, 1)):
+        indexer.run()
     current_search.flush_and_refresh(index="*")
 
     def aggregate_and_check_version(expected_version):
@@ -240,7 +249,7 @@ def test_bookmark_removal(app, open_search, mock_event_queue):
                 query_modifiers=[],
             ).run()
         current_search.flush_and_refresh(index="*")
-        res = open_search.search(index="stats-file-download", version=True)
+        res = open_search.search(index=prefix_index("stats-index"), version=True)
         for hit in res["hits"]["hits"]:
             assert hit["_version"] == expected_version
 
@@ -248,7 +257,8 @@ def test_bookmark_removal(app, open_search, mock_event_queue):
     aggregate_and_check_version(1)
 
     # Delete all bookmarks
-    open_search.indices.delete(index="stats-bookmarks")
+    StatsBookmark.query.filter_by(source_id="file-download-agg").delete()
+    db_.session.commit()
     current_search.flush_and_refresh(index="*")
     # the aggregations should have been overwritten
     aggregate_and_check_version(2)
@@ -271,7 +281,7 @@ def test_date_range(app, open_search, event_queues, indexed_events):
     with patch("invenio_stats.aggregations.datetime", mock_date(2015, 2, 4)):
         aggregate_events(["file-download-agg"])
     current_search.flush_and_refresh(index="*")
-    query = dsl.Search(using=open_search, index="stats-file-download")[0:30].sort(
+    query = dsl.Search(using=open_search, index=prefix_index("stats-index"))[0:30].sort(
         "file_id"
     )
     results = query.execute()
@@ -314,7 +324,7 @@ def test_filter_robots(app, open_search, event_queues, indexed_events, with_robo
         ).run()
 
     current_search.flush_and_refresh(index="*")
-    query = dsl.Search(using=open_search, index="stats-file-download")[0:30].sort(
+    query = dsl.Search(using=open_search, index=prefix_index("stats-index"))[0:30].sort(
         "file_id"
     )
     results = query.execute()
@@ -368,7 +378,7 @@ def test_metric_aggregations(app, open_search, event_queues):
         stat_agg.run()
     current_search.flush_and_refresh(index="*")
 
-    query = dsl.Search(using=open_search, index="stats-file-download")
+    query = dsl.Search(using=open_search, index=prefix_index("stats-index"))
     results = query.execute()
     assert len(results) == 1
     assert results[0].count == 12  # 3 views over 4 differnet hour slices
@@ -382,7 +392,7 @@ def setup_search_events(open_search, event_type, base_time, count=3):
     for i in range(count):
         event = {
             "_op_type": "index",
-            "_index": "test-events-stats-index",
+            "_index": prefix_index("events-stats-index"),
             "_source": {
                 "timestamp": (base_time + timedelta(seconds=i*10)).replace(microsecond=0).replace(tzinfo=None).isoformat(),
                 "event_type": event_type,
@@ -404,7 +414,7 @@ def setup_search_events(open_search, event_type, base_time, count=3):
             
         events.append(event)
     search.helpers.bulk(open_search, events)
-    open_search.indices.refresh(index="test-events-stats-index")
+    open_search.indices.refresh(index=prefix_index("events-stats-index"))
 
 def setup_search_aggregations(open_search, event_type="file-download", count=10):
     """Insert test data into the specified Search index for testing the branch logic of 'if res.hits.total.value > 0'."""
@@ -412,7 +422,7 @@ def setup_search_aggregations(open_search, event_type="file-download", count=10)
     for i in range(count):
         event = {
                 "_op_type": "index",
-                "_index": "test-stats-index",
+                "_index": prefix_index("stats-index"),
                 "_id": f"test_doc_{i}",
                 "_source": {
                     "timestamp": datetime.datetime.now().isoformat(),
@@ -426,7 +436,7 @@ def setup_search_aggregations(open_search, event_type="file-download", count=10)
         }
         events.append(event)
     search.helpers.bulk(open_search, events)
-    open_search.indices.refresh(index="test-stats-index")
+    open_search.indices.refresh(index=prefix_index("stats-index"))
 
 def run_aggregation_test(open_search, event_type, base_time, previous_bookmark, manual, metric_fields):
     """Run the aggregation test for the given event_type and bookmark."""
@@ -497,7 +507,7 @@ def test_agg_iter(app, open_search, caplog):
                     } if mf else {}
                     run_aggregation_test(open_search, event_type, base_time, previous_bookmark, manual, metric_fields=metric_fields)
 
-        agg_index_name = f"{app.config['SEARCH_INDEX_PREFIX']}stats-{event_type}"
+        agg_index_name = f"{app.config['SEARCH_INDEX_PREFIX']}stats-index"
         agg_search_result = open_search.search(index=agg_index_name, body={"query": {"match_all": {}}})
         print(f"Documents in aggregation index {agg_index_name}: {agg_search_result['hits']['total']['value']}")
 
@@ -589,7 +599,7 @@ def test_aggregator_run(app, open_search, db, setup_test_data):
         # Verify bookmark was updated
         bookmark = StatsBookmark.query.filter_by(source_id=f'{event_type}-agg').order_by(StatsBookmark.updated.desc()).first()
         assert bookmark is not None, f"Bookmark not found for {event_type}"
-        source_data = json.loads(bookmark.source)
+        source_data = bookmark.source
         assert source_data['date'] == (base_time + timedelta(days=5)).strftime('%Y-%m-%dT%H:%M:%S'), f"Incorrect bookmark date for {event_type}"
 
         # Test Case 5: Run with update_bookmark set to False
@@ -599,12 +609,12 @@ def test_aggregator_run(app, open_search, db, setup_test_data):
         # Verify bookmark was not updated
         bookmark = StatsBookmark.query.filter_by(source_id=f'{event_type}-agg').order_by(StatsBookmark.updated.desc()).first()
         assert bookmark is not None, f"Bookmark not found for {event_type}"
-        source_data = json.loads(bookmark.source)
+        source_data = bookmark.source
         assert source_data['date'] == (base_time + timedelta(days=5)).strftime('%Y-%m-%dT%H:%M:%S'), f"Bookmark should remain unchanged for {event_type}"
 
         # Verify final aggregation results
         current_search.flush_and_refresh(index='*')
-        search = dsl.Search(using=open_search, index=f'test-stats-{event_type}')
+        search = dsl.Search(using=open_search, index=prefix_index('stats-index')).filter('term', event_type=event_type)
         results = search.execute()
 
         assert results.hits.total.value > 0, f"No aggregation results found for {event_type}"
@@ -641,21 +651,21 @@ def test_aggregator_delete(app, open_search, db, setup_test_data):
     current_search.flush_and_refresh(index='*')
     
     # Verify initial state
-    initial_agg_count = open_search.count(index=f'test-stats-{event_type}')['count']
+    initial_agg_count = open_search.count(index=prefix_index('stats-index'))['count']
     initial_bookmark_count = StatsBookmark.query.filter_by(source_id=f'{event_type}-agg').count()
     
     assert initial_agg_count > 0, "No initial aggregations found"
     assert initial_bookmark_count > 0, "No initial bookmarks found"
     
     # Test Case 1: Delete all
-    print(f"Count before delete: {open_search.count(index=f'test-stats-{event_type}')['count']}")
+    print(f"Count before delete: {open_search.count(index=prefix_index('stats-index'))['count']}")
     print_specific_tables_data(db, "stats_bookmark")
     aggregator.delete()
     current_search.flush_and_refresh(index='*')
     
-    print(f"Count after delete: {open_search.count(index=f'test-stats-{event_type}')['count']}")
+    print(f"Count after delete: {open_search.count(index=prefix_index('stats-index'))['count']}")
     print_specific_tables_data(db, "stats_bookmark")
-    assert open_search.count(index=f'test-stats-{event_type}')['count'] == 0, "Not all aggregations were deleted"
+    assert open_search.count(index=prefix_index('stats-index'))['count'] == 0, "Not all aggregations were deleted"
     assert StatsBookmark.query.filter_by(source_id=f'{event_type}-agg').count() == 0, "Not all bookmarks were deleted"
 
     # Regenerate aggregations for next tests
@@ -667,47 +677,47 @@ def test_aggregator_delete(app, open_search, db, setup_test_data):
     current_search.flush_and_refresh(index='*')
 
     # Test Case 2: Delete using start_date
-    print(f"Count before delete: {open_search.count(index=f'test-stats-{event_type}')['count']}")
+    print(f"Count before delete: {open_search.count(index=prefix_index('stats-index'))['count']}")
     print_specific_tables_data(db, "stats_bookmark")
     
     start_date = base_time + timedelta(days=5)
     aggregator.delete(start_date=start_date)
     current_search.flush_and_refresh(index='*')
 
-    print(f"Count after delete: {open_search.count(index=f'test-stats-{event_type}')['count']}")
+    print(f"Count after delete: {open_search.count(index=prefix_index('stats-index'))['count']}")
     print_specific_tables_data(db, "stats_bookmark")
-    remaining_aggs = open_search.search(index=f'test-stats-{event_type}')['hits']['hits']
+    remaining_aggs = open_search.search(index=prefix_index('stats-index'))['hits']['hits']
     assert all(agg['_source']['timestamp'] < start_date.isoformat() for agg in remaining_aggs), "Aggregations after start_date were not deleted"
     
     remaining_bookmarks = StatsBookmark.query.filter_by(source_id=f'{event_type}-agg').all()
     assert all(bookmark.date < start_date for bookmark in remaining_bookmarks), "Bookmarks after start_date were not deleted"
 
     # Test Case 3: Delete using end_date
-    print(f"Count before delete: {open_search.count(index=f'test-stats-{event_type}')['count']}")
+    print(f"Count before delete: {open_search.count(index=prefix_index('stats-index'))['count']}")
     print_specific_tables_data(db, "stats_bookmark")
     end_date = base_time + timedelta(days=3)
     aggregator.delete(end_date=end_date)
     current_search.flush_and_refresh(index='*')
 
-    print(f"Count after delete: {open_search.count(index=f'test-stats-{event_type}')['count']}")
+    print(f"Count after delete: {open_search.count(index=prefix_index('stats-index'))['count']}")
     print_specific_tables_data(db, "stats_bookmark")
-    remaining_aggs = open_search.search(index=f'test-stats-{event_type}')['hits']['hits']
+    remaining_aggs = open_search.search(index=prefix_index('stats-index'))['hits']['hits']
     assert all(agg['_source']['timestamp'] > end_date.isoformat() for agg in remaining_aggs), "Aggregations before end_date were not deleted"
     
     remaining_bookmarks = StatsBookmark.query.filter_by(source_id=f'{event_type}-agg').all()
     assert all(bookmark.date > end_date for bookmark in remaining_bookmarks), "Bookmarks before end_date were not deleted"
 
     # Test Case 4: Delete using both start_date and end_date
-    print(f"Count before delete: {open_search.count(index=f'test-stats-{event_type}')['count']}")
+    print(f"Count before delete: {open_search.count(index=prefix_index('stats-index'))['count']}")
     print_specific_tables_data(db, "stats_bookmark")
     start_date = base_time + timedelta(days=1)
     end_date = base_time + timedelta(days=8)
     aggregator.delete(start_date=start_date, end_date=end_date)
     current_search.flush_and_refresh(index='*')
 
-    print(f"Count after delete: {open_search.count(index=f'test-stats-{event_type}')['count']}")
+    print(f"Count after delete: {open_search.count(index=prefix_index('stats-index'))['count']}")
     print_specific_tables_data(db, "stats_bookmark")
-    remaining_aggs = open_search.search(index=f'test-stats-{event_type}')['hits']['hits']
+    remaining_aggs = open_search.search(index=prefix_index('stats-index'))['hits']['hits']
     assert all(agg['_source']['timestamp'] < start_date.isoformat() or agg['_source']['timestamp'] > end_date.isoformat() for agg in remaining_aggs), "Aggregations within specified range were not deleted"
     
     remaining_bookmarks = StatsBookmark.query.filter_by(source_id=f'{event_type}-agg').all()

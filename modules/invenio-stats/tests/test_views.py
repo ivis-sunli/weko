@@ -185,13 +185,15 @@ def test_query_record_view_count(client_1, db, open_search, records):
             assert res.status_code == 200
 
 # .tox/c1/bin/pytest --cov=invenio_stats tests/test_views.py::test_query_record_view_count_error -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/invenio-stats/.tox/c1/tmp
-def test_query_record_view_count_error(client, db, records):
+def test_query_record_view_count_error(client_1, db, records, open_search):
+    client = client_1
+    record_uuid = str(records[0][0].object_uuid)
     _uuid = uuid.uuid4()
     res = client.get(
         url_for("invenio_stats.get_record_view_count", record_id=_uuid))
     assert res.status_code==200
 
-    _uuid = str(records[0][0].object_uuid)
+    _uuid = record_uuid
     res = client.get(
         url_for("invenio_stats.get_record_view_count", record_id=_uuid))
     assert res.status_code==200

@@ -14,6 +14,7 @@ import pytest
 import uuid
 
 
+from invenio_search.utils import prefix_index
 from invenio_stats.models import StatsEvents, StatsAggregation, StatsBookmark
 from invenio_stats.utils import (
     get_anonymization_salt,
@@ -96,13 +97,14 @@ def test_default_permission_factory(app):
 
 # def get_aggregations(index, aggs_query):
 # .tox/c1/bin/pytest --cov=invenio_stats tests/test_utils.py::test_get_aggregations -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/invenio-stats/.tox/c1/tmp
-def test_get_aggregations(app):
+def test_get_aggregations(app, open_search):
     with app.app_context():
         res = get_aggregations('', {})
         assert res=={}
 
-        res = get_aggregations('test-stats-search', {'aggs': {}})
-        assert res=={'_shards': {'failed': 0, 'skipped': 0, 'successful': 5, 'total': 5}, 'hits': {'hits': [], 'max_score': None, 'total': 0}, 'timed_out': False, 'took': 0}
+        res = get_aggregations('stats-index', {'aggs': {}})
+        assert res=={'_shards': {'failed': 0, 'skipped': 0, 'successful': 1, 'total': 1}, 'hits': {'hits': [], 'max_score': None, 'total': {'value': 0, 'relation': 'eq'}}, 'timed_out': False, 'took': res['took']}
+        assert isinstance(res['took'], int) and res['took'] >= 0
 
 # def get_start_end_date(year, month):
 # .tox/c1/bin/pytest --cov=invenio_stats tests/test_utils.py::test_get_start_end_date -v -s -vv --cov-branch --cov-report=term --cov-config=tox.ini --basetemp=/code/modules/invenio-stats/.tox/c1/tmp
@@ -412,12 +414,12 @@ def test_query_search_report_helper(app):
         with patch('invenio_stats.queries.SearchWekoTermsQuery.run', return_value=_raw_res2):
             res = QuerySearchReportHelper.get(
                 year=2022, month=10, start_date='2022-10-01', end_date='2022-10-31', repository_id='com1')
-            assert res=={'all': [{'search_key': 'key2', 'count': 7}, {'search_key': 'key1', 'count': 4}]}
+            assert res=={'all': [{'search_key': 'key2', 'count': 7}, {'search_key': 'key1', 'count': 4}], 'date': '2022-10-01-2022-10-31'}
 
         with patch('invenio_stats.queries.SearchWekoTermsQuery.run', return_value=_raw_res2):
             res = QuerySearchReportHelper.get(
                 year=2022, month=10, start_date='2022-10-01', end_date='2022-10-31', repository_id='Root Index')
-            assert res=={'all': [{'search_key': 'key2', 'count': 7}, {'search_key': 'key1', 'count': 4}]}
+            assert res=={'all': [{'search_key': 'key2', 'count': 7}, {'search_key': 'key1', 'count': 4}], 'date': '2022-10-01-2022-10-31'}
 
 # .tox/c1/bin/pytest --cov=invenio_stats tests/test_utils.py::test_query_search_report_helper_error -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/invenio-stats/.tox/c1/tmp
 def test_query_search_report_helper_error(app):
@@ -460,11 +462,11 @@ def test_query_common_reports_helper(mock_Community, mock_get_descendant_index_n
             res = QueryCommonReportsHelper.get(event='top_page_access', year=2022, month=10, start_date='2022-10-01', end_date='2022-10-10')
             assert res=={'date': '2022-10-01-2022-10-10', 'all': {'localhost': {'host': 'name2', 'ip': 'localhost', 'count': 2}}}
 
-        with patch('invenio_stats.queries.ESTermsQuery.run', return_value=_res):
+        with patch('invenio_stats.queries.SearchTermsQuery.run', return_value=_res):
             res = QueryCommonReportsHelper.get(event='top_page_access', year=2022, month=10)
             assert res=={'date': '2022-10', 'all': {'localhost': {'host': 'name2', 'ip': 'localhost', 'count': 2}}}
 
-        with patch('invenio_stats.queries.ESTermsQuery.run', return_value=_res):
+        with patch('invenio_stats.queries.SearchTermsQuery.run', return_value=_res):
             mock_Community.query.get.return_value = MagicMock(root_node_id=1)
             mock_get_descendant_index_names.return_value = ['index1']
             res = QueryCommonReportsHelper.get(event='top_page_access', year=2022, month=10, start_date='2022-10-01', end_date='2022-10-10', repository_id='com1')
@@ -557,9 +559,9 @@ def test_query_record_view_per_index_report_helper(mock_Community, mock_get_desc
 
         # build_query
         res = QueryRecordViewPerIndexReportHelper.build_query(None, None, 'test_key')
-        assert res.to_dict()=={'aggs': {'record_index_list': {'nested': {'path': 'record_index_list'}, 'aggs': {'my_buckets': {'composite': {'size': 6000, 'sources': [{'record_index_list.index_id': {'terms': {'field': 'record_index_list.index_id'}}}, {'record_index_list.index_name': {'terms': {'field': 'record_index_list.index_name'}}}], 'after': 'test_key'}}}}}, 'from': 0, 'size': 0}
+        assert res.to_dict()=={'query': {'bool': {'filter': [{'term': {'event_type': 'record-view'}}]}}, 'aggs': {'record_index_list': {'nested': {'path': 'record_index_list'}, 'aggs': {'my_buckets': {'composite': {'size': 6000, 'sources': [{'record_index_list.index_id': {'terms': {'field': 'record_index_list.index_id'}}}, {'record_index_list.index_name': {'terms': {'field': 'record_index_list.index_name'}}}], 'after': 'test_key'}}}}}, 'from': 0, 'size': 0}
         res = QueryRecordViewPerIndexReportHelper.build_query(None, None, index_list=['index1'])
-        assert res.to_dict()=={'query': {'bool': {'filter': [{'nested': {'path': 'record_index_list', 'query': {'terms': {'record_index_list.index_name': ['index1']}}}}]}}, 'from': 0, 'size': 0, 'aggs': {'record_index_list': {'nested': {'path': 'record_index_list'}, 'aggs': {'my_buckets': {'composite': {'size': 6000, 'sources': [{'record_index_list.index_id': {'terms': {'field': 'record_index_list.index_id'}}}, {'record_index_list.index_name': {'terms': {'field': 'record_index_list.index_name'}}}]}}}}}}
+        assert res.to_dict()=={'query': {'bool': {'filter': [{'term': {'event_type': 'record-view'}}, {'nested': {'path': 'record_index_list', 'query': {'terms': {'record_index_list.index_name': ['index1']}}}}]}}, 'from': 0, 'size': 0, 'aggs': {'record_index_list': {'nested': {'path': 'record_index_list'}, 'aggs': {'my_buckets': {'composite': {'size': 6000, 'sources': [{'record_index_list.index_id': {'terms': {'field': 'record_index_list.index_id'}}}, {'record_index_list.index_name': {'terms': {'field': 'record_index_list.index_name'}}}]}}}}}}
 
         # parse_bucket_response
         _aggs = {
@@ -836,11 +838,13 @@ def test_query_item_reg_report_helper(mock_Community, mock_get_descendant_index_
         assert res=={'num_page': 1, 'page': 1, 'data': [{'count': 1, 'start_date': '2022-01-01', 'end_date': '2022-12-31', 'year': 2022, 'is_restricted': False}]}
 
     current_search_client.create(
-        index="test-stats-record-view",
+        index=prefix_index("stats-index"),
         id=1,
         body={
           "timestamp" : "2022-09-15T01:00:00",
           "unique_id" : "68a04d6c-fc25-39de-a9d6-31a24a46892c",
+          "event_type": "record-view",
+          "is_restricted": False,
           "count" : 14,
           "unique_count" : 1,
           "country" : None,
@@ -856,7 +860,7 @@ def test_query_item_reg_report_helper(mock_Community, mock_get_descendant_index_
           "site_license_flag" : False
         }
     )
-    current_search_client.indices.refresh()
+    current_search_client.indices.refresh(index=prefix_index("stats-index"))
     res = QueryItemRegReportHelper.get(target_report='2', unit='Day', start_date='0', end_date='0')
     assert res=={'data': [{"count":14.0, "end_date":"2022-09-15","start_date":"2022-09-15"}], 'num_page': 1, 'page': 1}
     res = QueryItemRegReportHelper.get(target_report='2', unit='Day', start_date='0', end_date='0', repository_id='com1')
