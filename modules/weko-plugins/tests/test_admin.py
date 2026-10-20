@@ -37,8 +37,8 @@ def test_admin(app):
     assert "kwargs" in plugin_adminview
 
     # Register both models in admin
-    view_class = plugin_adminview.pop("view_class")
-    kwargs = plugin_adminview.pop("kwargs")
+    view_class = plugin_adminview["view_class"]
+    kwargs = plugin_adminview["kwargs"]
     admin.add_view(view_class(**kwargs))
 
     # Check if generated admin menu contains the correct items

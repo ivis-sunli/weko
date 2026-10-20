@@ -22,11 +22,18 @@
 
 import os
 import shutil
+import sys
 import tempfile
 
 import pytest
 from flask import Flask
 from flask_babel import Babel
+
+
+@pytest.fixture(autouse=True)
+def isolate_plugin_import_path(monkeypatch):
+    """Restore paths appended by the real plugin initialization."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
 
 
 @pytest.fixture()
