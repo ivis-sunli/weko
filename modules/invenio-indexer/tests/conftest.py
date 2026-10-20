@@ -11,6 +11,7 @@
 import os
 import shutil
 import tempfile
+import uuid
 
 import pytest
 from celery.messaging import establish_connection
@@ -20,66 +21,108 @@ from invenio_db import InvenioDB, db
 from invenio_records import InvenioRecords
 from invenio_search import InvenioSearch
 from invenio_search.engine import dsl
+from sqlalchemy.engine.url import make_url
 from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 
 from invenio_indexer import InvenioIndexer
+from invenio_indexer.signals import before_record_index
 from kombu import Exchange, Queue
-from unittest.mock import patch
+
 
 @pytest.fixture()
-@patch.dict('os.environ', {'INVENIO_OPENSEARCH_USER': 'invenio', 'INVENIO_OPENSEARCH_PASSWORD': 'openpass123!'})
-def base_app(request):
+def base_app(request, monkeypatch):
     """Base application fixture."""
     instance_path = tempfile.mkdtemp()
     app = Flask("testapp", instance_path=instance_path)
+    signal_receivers = set(before_record_index.receivers_for(app))
+    database_url = make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+        database='indexer_ut_' + uuid.uuid4().hex)
+    index_prefix = 'indexer-ut-' + uuid.uuid4().hex + '-'
+    queue_name = 'indexer-ut-' + uuid.uuid4().hex
+    exchange = Exchange(queue_name, type='direct')
     app.config.update(
-        BROKER_URL='amqp://guest:guest@rabbitmq:5672/',
-        CELERY_BROKER_URL=os.environ.get(
-            "BROKER_URL", "amqp://guest:guest@rabbitmq:5672//"
-        ),
-        CELERY_TASK_ALWAYS_EAGER=True,
+        BROKER_URL=os.environ['BROKER_URL'],
+        CELERY_BROKER_URL=os.environ['BROKER_URL'],
+        BROKER_TRANSPORT_OPTIONS={'confirm_publish': True},
+        CELERY_ALWAYS_EAGER=True,
         CELERY_CACHE_BACKEND="memory",
-        CELERY_TASK_EAGER_PROPAGATES=True,
+        CELERY_EAGER_PROPAGATES=True,
         CELERY_RESULT_BACKEND="cache",
         JSONSCHEMAS_URL_SCHEME='http',
         SECRET_KEY='CHANGE_ME',
         SECURITY_PASSWORD_SALT='CHANGE_ME_ALSO',
-        INDEXER_DEFAULT_INDEX="records-default-v1.0.0",
-        INDEXER_MQ_QUEUE = Queue("indexer",
-                                 exchange=Exchange("indexer", type="direct"), routing_key="indexer",auto_delete=False,queue_arguments={"x-queue-type":"quorum"}),
-        # SQLALCHEMY_DATABASE_URI=os.environ.get(
-        #     "SQLALCHEMY_DATABASE_URI", "sqlite:///test.db"
-        # ),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
-        SEARCH_OPENSEARCH_HOSTS=os.environ.get(
-                'SEARCH_OPENSEARCH_HOSTS', 'opensearch'),
-        SEARCH_HOSTS=os.environ.get(
-            'SEARCH_HOST', 'opensearch'
-        ),
-        SEARCH_UI_SEARCH_INDEX="test-weko",
-        SEARCH_CLIENT_CONFIG={"http_auth":("invenio","openpass123!"),"use_ssl":True, "verify_certs":False},
+        INDEXER_DEFAULT_INDEX=index_prefix + "records-default-v1.0.0",
+        INDEXER_MQ_QUEUE=Queue(
+            queue_name, exchange=exchange, routing_key=queue_name,
+            auto_delete=False, queue_arguments={"x-queue-type": "quorum"}),
+        INDEXER_MQ_EXCHANGE=exchange,
+        INDEXER_MQ_ROUTING_KEY=queue_name,
+        SQLALCHEMY_DATABASE_URI=database_url,
+        SEARCH_HOSTS=[os.environ['SEARCH_OPENSEARCH_HOSTS']],
+        SEARCH_INDEX_PREFIX="",
+        SEARCH_UI_SEARCH_INDEX=index_prefix + "records-default-v1.0.0",
+        SEARCH_CLIENT_CONFIG={
+            "http_auth": (os.environ['INVENIO_OPENSEARCH_USER'],
+                          os.environ['INVENIO_OPENSEARCH_PASS']),
+            "use_ssl": True, "verify_certs": False,
+        },
         SQLALCHEMY_TRACK_MODIFICATIONS=False,
         TESTING=True,
     )
-    FlaskCeleryExt(app)
-    InvenioDB(app)
-    InvenioRecords(app)
-    search = InvenioSearch(app, entry_point_group=None)
-    search.register_mappings("records", "tests.data")
+    try:
+        celery_extension = FlaskCeleryExt(app)
+        monkeypatch.setattr(celery_extension.celery, 'flask_app', app)
+        assert celery_extension.celery.conf.task_always_eager
+        InvenioDB(app)
+        InvenioRecords(app)
+        search = InvenioSearch(app, entry_point_group=None)
+        search.register_mappings("records", "tests.data")
 
-    with app.app_context():
-        if not database_exists(str(db.engine.url)):
-            create_database(str(db.engine.url))
-        db.create_all()
-
-    def teardown():
         with app.app_context():
-            drop_database(str(db.engine.url))
-        shutil.rmtree(instance_path)
+            create_database(database_url)
+            db.create_all()
 
-    request.addfinalizer(teardown)
-    return app
+        yield app
+    finally:
+        try:
+            for receiver in set(before_record_index.receivers_for(app)) - signal_receivers:
+                before_record_index.disconnect(receiver)
+            with app.app_context():
+                queues = {queue_name: app.config['INDEXER_MQ_QUEUE']}
+                extension = app.extensions.get('invenio-indexer')
+                if extension is not None:
+                    for indexer in extension.registry.all().values():
+                        queues[indexer.mq_queue.name] = indexer.mq_queue
+                with establish_connection() as connection:
+                    for item in queues.values():
+                        item(connection).delete()
+                    exchange(connection).delete(if_unused=True)
+        finally:
+            try:
+                celery_extension = app.extensions.get('flask-celeryext')
+                if celery_extension is not None:
+                    celery_extension.celery.close()
+            finally:
+                try:
+                    if 'invenio-search' in app.extensions:
+                        with app.app_context():
+                            client = app.extensions['invenio-search'].client
+                            owned = client.indices.get(index=index_prefix + '*', ignore=[404])
+                            if 'error' not in owned:
+                                for name in owned:
+                                    assert name.startswith(index_prefix)
+                                    client.indices.delete(index=name)
+                            client.close()
+                finally:
+                    try:
+                        if 'sqlalchemy' in app.extensions:
+                            with app.app_context():
+                                db.session.remove()
+                                db.engine.dispose()
+                        if database_exists(database_url):
+                            drop_database(database_url)
+                    finally:
+                        shutil.rmtree(instance_path)
 
 
 @pytest.fixture()
