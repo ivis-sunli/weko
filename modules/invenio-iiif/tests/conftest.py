@@ -12,6 +12,7 @@ import os
 import pytest
 import shutil
 import tempfile
+import uuid
 
 
 from flask import Flask, request
@@ -35,6 +36,7 @@ from invenio_i18n import InvenioI18N
 from os.path import dirname, getsize, join
 from sqlalchemy_utils.functions import create_database, database_exists, \
     drop_database
+from sqlalchemy.engine.url import make_url
 from tests.helpers import json_data, create_record
 
 @pytest.fixture()
@@ -54,16 +56,15 @@ def instance_path():
 
 @pytest.fixture()
 def base_app(instance_path):
+    database_url = make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+        database='iiif_ut_{}'.format(uuid.uuid4().hex))
     app_ = Flask('test_invenio_iiif_app', instance_path=instance_path)
     app_.config.update(
         TESTING=True,
         SERVER_NAME='test_server',
         ACCOUNTS_USE_CELERY=False,
         SECRET_KEY='SECRET_KEY',
-        # SQLALCHEMY_DATABASE_URI=os.environ.get(
-        #      'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                         'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_url,
         SEARCH_UI_SEARCH_INDEX="test-search-weko",
         WEKO_AUTHORS_SEARCH_INDEX_NAME="test-weko-authors",
         INDEXER_FILE_DOC_TYPE="content",
@@ -99,15 +100,17 @@ def client(app):
 
 @pytest.fixture()
 def db(app):
-    # if not database_exists(str(db_.engine.url)) and \
-    #         app.config['SQLALCHEMY_DATABASE_URI'] != 'sqlite://':
-    #     create_database(db_.engine.url)
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    database_url = db_.engine.url
+    if database_exists(database_url):
+        raise RuntimeError('Test database must be newly owned by this fixture')
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
 
 
 @pytest.fixture(scope='module')
