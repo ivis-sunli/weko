@@ -14,8 +14,9 @@ import os
 import pytest
 import shutil
 import tempfile
+import uuid
 
-from flask import Flask
+from flask import Flask, g
 from flask.cli import ScriptInfo
 from flask_babel import Babel
 from flask_celeryext import FlaskCeleryExt
@@ -32,6 +33,8 @@ from invenio_db import InvenioDB, db
 from invenio_deposit import InvenioDeposit, InvenioDepositREST
 from invenio_deposit.api import Deposit
 from invenio_deposit.scopes import write_scope
+from invenio_deposit.signals import post_action
+from invenio_deposit.receivers import index_deposit_after_publish
 from invenio_files_rest import InvenioFilesREST
 from invenio_files_rest.models import Location
 from invenio_indexer import InvenioIndexer
@@ -53,9 +56,9 @@ from invenio_search import InvenioSearch, current_search, current_search_client
 from invenio_search_ui import InvenioSearchUI
 from kombu import Exchange, Queue
 
-from time import sleep
 from io import BytesIO
 from sqlalchemy import inspect
+from sqlalchemy.engine.url import make_url
 from sqlalchemy_utils.functions import create_database, database_exists, \
     drop_database
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
@@ -74,7 +77,13 @@ def base_app(request):
     """Flask application fixture."""
     instance_path = tempfile.mkdtemp()
 
+    database_url = make_url(os.environ['SQLALCHEMY_DATABASE_URI'])
+    database_url = database_url.set(database='deposit_ut_' + uuid.uuid4().hex)
+    index_prefix = 'deposit-ut-' + uuid.uuid4().hex + '-'
+    apps = []
+
     def init_app(app_):
+        apps.append(app_)
         app_.config.update(
             BROKER_URL='amqp://guest:guest@rabbitmq:5672/',
             CELERY_BROKER_URL='amqp://guest:guest@rabbitmq:5672/',
@@ -92,10 +101,8 @@ def base_app(request):
             JSONSCHEMAS_URL_SCHEME='http',
             SECRET_KEY='CHANGE_ME',
             SECURITY_PASSWORD_SALT='CHANGE_ME_ALSO',
-            # SQLALCHEMY_DATABASE_URI=os.environ.get(
-            #     'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-            SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                              'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+            SQLALCHEMY_DATABASE_URI=database_url,
+            SEARCH_INDEX_PREFIX=index_prefix,
             SEARCH_OPENSEARCH_HOSTS=os.environ.get(
                     'SEARCH_OPENSEARCH_HOSTS', 'opensearch'),
             SEARCH_HOSTS=os.environ.get(
@@ -125,6 +132,12 @@ def base_app(request):
             ACCOUNTS_COVER_TEMPLATE="invenio_accounts/base_cover.html",
             ACCOUNTS_BASE_TEMPLATE="invenio_accounts/base.html"
         )
+
+        @app_.before_request
+        def clear_login_cache():
+            # Each client request must load its own session/OAuth identity.
+            g.pop('_login_user', None)
+
         Babel(app_)
         FlaskCeleryExt(app_)
         OAuth2Provider(app_)
@@ -141,45 +154,66 @@ def base_app(request):
         search = InvenioSearch(app_)
         search.register_mappings('deposits', 'invenio_deposit.mappings')
 
-    api_app = Flask('testapiapp', instance_path=instance_path)
-    api_app.url_map.converters['pid'] = PIDConverter
-    # initialize InvenioDeposit first in order to detect any invalid dependency
-    InvenioDepositREST(api_app)
+    try:
+        api_app = Flask('testapiapp', instance_path=instance_path)
+        api_app.url_map.converters['pid'] = PIDConverter
+        # initialize InvenioDeposit first in order to detect any invalid dependency
+        InvenioDepositREST(api_app)
 
-    init_app(api_app)
-    InvenioREST(api_app)
-    InvenioOAuth2ServerREST(api_app)
-    InvenioRecordsREST(api_app)
+        init_app(api_app)
+        InvenioREST(api_app)
+        InvenioOAuth2ServerREST(api_app)
+        InvenioRecordsREST(api_app)
 
-    app_ = Flask('testapp', instance_path=instance_path)
-    app_.url_map.converters['pid'] = PIDConverter
-    # initialize InvenioDeposit first in order to detect any invalid dependency
-    InvenioDeposit(app_)
-    init_app(app_)
-    app_.register_blueprint(create_settings_blueprint(app_))
-    app_.register_blueprint(create_rest_blueprint(app_))
-    app_.register_blueprint(oauth2server_settings_blueprint)
-    InvenioAssets(app_)
-    InvenioSearchUI(app_)
-    InvenioRecordsUI(app_)
-    app_.register_blueprint(records_ui_bp(app_))
-    app_.register_blueprint(records_rest_bp(app_))
-    app_.wsgi_app = DispatcherMiddleware(app_.wsgi_app, {
-        '/api': api_app.wsgi_app
-    })
+        app_ = Flask('testapp', instance_path=instance_path)
+        app_.url_map.converters['pid'] = PIDConverter
+        # initialize InvenioDeposit first in order to detect any invalid dependency
+        InvenioDeposit(app_)
+        init_app(app_)
+        app_.register_blueprint(create_settings_blueprint(app_))
+        app_.register_blueprint(create_rest_blueprint(app_))
+        app_.register_blueprint(oauth2server_settings_blueprint)
+        InvenioAssets(app_)
+        InvenioSearchUI(app_)
+        InvenioRecordsUI(app_)
+        app_.register_blueprint(records_ui_bp(app_))
+        app_.register_blueprint(records_rest_bp(app_))
+        app_.wsgi_app = DispatcherMiddleware(app_.wsgi_app, {
+            '/api': api_app.wsgi_app
+        })
 
-    with app_.app_context():
-        if str(db.engine.url) != 'sqlite://' and \
-           not database_exists(str(db.engine.url)):
-            create_database(str(db.engine.url))
-        db.create_all()
+        with app_.app_context():
+            if str(db.engine.url) != 'sqlite://' and \
+               not database_exists(database_url):
+                create_database(database_url)
+            db.create_all()
 
-    yield app_
+        yield app_
 
-    with app_.app_context():
-        if str(db.engine.url) != 'sqlite://':
-            drop_database(str(db.engine.url))
-        shutil.rmtree(instance_path)
+    finally:
+        try:
+            for application in apps:
+                with application.app_context():
+                    if 'invenio-search' in application.extensions:
+                        # Include indices auto-created by API-internal indexers.
+                        owned_indices = current_search_client.indices.get(
+                            index=index_prefix + '*', ignore=[404])
+                        for name in owned_indices:
+                            if name.startswith(index_prefix):
+                                current_search_client.indices.delete(index=name)
+                        current_search_client.close()
+        finally:
+            for application in apps:
+                post_action.disconnect(index_deposit_after_publish,
+                                       sender=application)
+                if 'sqlalchemy' not in application.extensions:
+                    continue
+                with application.app_context():
+                    db.session.remove()
+                    db.engine.dispose()
+            if database_exists(database_url):
+                drop_database(database_url)
+            shutil.rmtree(instance_path)
 
 
 @pytest.yield_fixture()
@@ -309,43 +343,55 @@ def fake_schemas(app, api, search, tmpdir):
 def search(app):
     """Search fixture."""
     try:
-        # current_search_client.indices.delete(index="test-*")
         list(current_search.create())
-    except:
+        current_search_client.indices.refresh(index=app.config['SEARCH_INDEX_PREFIX'] + '*')
+        yield current_search_client
+    finally:
         list(current_search.delete(ignore=[404]))
-        list(current_search.create(ignore=[400]))
-    current_search_client.indices.refresh()
-    yield current_search_client
-    list(current_search.delete(ignore=[404]))
 
 
 @pytest.fixture()
 def location(app):
     """Create default location."""
     tmppath = tempfile.mkdtemp()
-    with db.session.begin_nested():
-        Location.query.delete()
-        loc = Location(name='local', uri=tmppath, default=True)
-        db.session.add(loc)
-    db.session.commit()
-    return location
+    try:
+        with db.session.begin_nested():
+            loc = Location(name='local', uri=tmppath, default=True)
+            db.session.add(loc)
+        db.session.commit()
+        yield loc
+    finally:
+        shutil.rmtree(tmppath)
 
 
 @pytest.fixture()
-def deposit(app, search, users, location):
-    """New deposit with files."""
-    record = {
-        'title': 'fuu'
-    }
-    with app.test_request_context():
-        datastore = app.extensions['security'].datastore
-        login_user(datastore.find_user(email=users[0]['email']))
-        deposit = Deposit.create(record)
-        deposit.pid.register()
-        deposit.commit()
-        db.session.commit()
-    sleep(2)
-    return deposit
+def deposit_factory(app, search, users, location):
+    """Create independently stored deposits, optionally without a bucket."""
+    def create(with_bucket=True):
+        record = {'title': 'fuu'}
+        with app.test_request_context():
+            datastore = app.extensions['security'].datastore
+            login_user(datastore.find_user(email=users[0]['email']))
+            deposit = Deposit.create(record, with_bucket=with_bucket)
+            deposit.pid.register()
+            deposit.commit()
+            db.session.commit()
+        current_search_client.indices.refresh(
+            index=app.config['SEARCH_INDEX_PREFIX'] + '*')
+        return deposit
+    return create
+
+
+@pytest.fixture()
+def deposit(deposit_factory):
+    """New deposit with an explicitly created file bucket."""
+    return deposit_factory()
+
+
+@pytest.fixture()
+def deposit_without_bucket(deposit_factory):
+    """Deposit for the existing missing-bucket case."""
+    return deposit_factory(with_bucket=False)
 
 
 @pytest.fixture()
