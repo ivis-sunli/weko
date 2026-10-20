@@ -12,7 +12,6 @@ import uuid
 
 import amqp
 import pytest
-import time
 from celery.messaging import establish_connection
 from invenio_db import db
 from invenio_pidstore.models import PersistentIdentifier, PIDStatus
@@ -26,7 +25,7 @@ from invenio_indexer.proxies import current_indexer_registry
 
 
 # .tox/c1/bin/pytest --cov=invenio_indexer tests/test_cli.py::test_run -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/invenio-indexer/.tox/c1/tmp
-def test_run(app):
+def test_run(app, queue):
     """Test run."""
     runner = app.test_cli_runner()
     res = runner.invoke(cli.run, [])
@@ -83,7 +82,7 @@ def test_reindex(app):
         # Make sure the index doesn't exist at the beginning (it was not
         # preserved by accident from some other tests)
         if current_search_client.indices.exists(index):
-            list(current_search.delete(ignore=[404]))
+            current_search_client.indices.delete(index=index, ignore=[404])
 
         assert current_search_client.indices.exists(index) is False
 
@@ -104,7 +103,6 @@ def test_reindex(app):
 
         res = runner.invoke(cli.reindex, ["--yes-i-know", "-t", "recid"])
         assert 0 == res.exit_code
-        time.sleep(1)
         res = runner.invoke(cli.run, [])
         assert 0 == res.exit_code
         current_search.flush_and_refresh(index)
@@ -118,10 +116,9 @@ def test_reindex(app):
         record2.delete()
         db.session.commit()
         # Destroy the index and reindex
-        list(current_search.delete(ignore=[404]))
+        current_search_client.indices.delete(index=index, ignore=[404])
         res = runner.invoke(cli.reindex, ["--yes-i-know", "-t", "recid"])
         assert 0 == res.exit_code
-        time.sleep(1)
         res = runner.invoke(cli.run, [])
         assert 0 == res.exit_code
         current_search.flush_and_refresh(index)
@@ -134,7 +131,7 @@ def test_reindex(app):
         # Destroy queue and the index
         res = runner.invoke(cli.queue, ["delete"])
         assert 0 == res.exit_code
-        list(current_search.delete(ignore=[404]))
+        current_search_client.indices.delete(index=index, ignore=[404])
 
 
 # .tox/c1/bin/pytest --cov=invenio_indexer tests/test_cli.py::test_queues_options -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/invenio-indexer/.tox/c1/tmp
