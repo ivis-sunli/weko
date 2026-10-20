@@ -412,10 +412,12 @@ def test_file_delete(api, deposit, files, users):
         assert res.status_code == 403
 
 
-def test_file_put_not_found_bucket_not_exist(api, deposit, users):
+def test_file_put_not_found_bucket_not_exist(api, deposit_without_bucket, users):
     """Test put file and bucket doesn't exist."""
     with api.test_request_context():
-        url = url_for('invenio_deposit_rest.depid_file', pid_value=deposit['_deposit']['id'], key='not_found')
+        url = url_for('invenio_deposit_rest.depid_file',
+                      pid_value=deposit_without_bucket['_deposit']['id'],
+                      key='not_found')
     with api.test_client() as client:
         # login
         login_user_via_session(client, email=users[0]['email'])

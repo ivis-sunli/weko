@@ -100,7 +100,7 @@ def test_simple_flow(app, fake_schemas, location):
 
 def test_delete(app, fake_schemas, location):
     """Test simple delete."""
-    deposit = Deposit.create({})
+    deposit = Deposit.create({}, with_bucket=True)
     pid = deposit.pid
     assert deposit['_deposit']['id']
     assert 'draft' == deposit.status
@@ -120,7 +120,7 @@ def test_files_property(app, fake_schemas, location):
     with pytest.raises(MissingModelError):
         Deposit({}).files
 
-    deposit = Deposit.create({})
+    deposit = Deposit.create({}, with_bucket=True)
 
     assert 0 == len(deposit.files)
     assert 'invalid' not in deposit.files

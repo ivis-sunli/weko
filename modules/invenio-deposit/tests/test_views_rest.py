@@ -10,6 +10,7 @@
 """Test deposit workflow."""
 
 import json
+from copy import deepcopy
 import pytest
 
 
@@ -406,6 +407,8 @@ def test_deposition_file_operations(api, search, location, users,
 def test_simple_rest_flow(app, test_client, api, search, location, fake_schemas, users,
                           json_headers):
     """Test simple flow using REST API."""
+    api.config['RECORDS_REST_ENDPOINTS'] = deepcopy(
+        api.config['RECORDS_REST_ENDPOINTS'])
     api.config['RECORDS_REST_ENDPOINTS']['recid'][
         'read_permission_factory_imp'] = \
         'invenio_records_rest.utils:allow_all'

@@ -80,7 +80,8 @@ def test_conflict_in_endpoint_prefixes():
     ext = InvenioDepositREST()
     ext.init_config(app)
 
-    endpoints = app.config['RECORDS_REST_ENDPOINTS']
+    endpoints = deepcopy(app.config['RECORDS_REST_ENDPOINTS'])
+    app.config['RECORDS_REST_ENDPOINTS'] = endpoints
     # Due to incompatibilty with how we are registering endpoints between
     # invenio packages we need to now sanitize the endpoints registered in this
     # test.
