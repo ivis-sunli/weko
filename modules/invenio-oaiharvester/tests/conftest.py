@@ -62,11 +62,19 @@ from invenio_pidrelations.models import PIDRelation
 from invenio_records import InvenioRecords
 from invenio_records_rest import InvenioRecordsREST
 from invenio_search import InvenioSearch, current_search_client
+from invenio_search.utils import build_alias_name
 
 from mock import patch
 from os.path import join
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
+from sqlalchemy.engine.url import make_url
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
+from redis import Redis
 from weko_deposit import WekoDeposit
+from weko_deposit.config import PIDRELATIONS_RELATION_TYPES
 from weko_index_tree.models import Index
 from weko_records import WekoRecords
 from weko_records.api import ItemsMetadata
@@ -84,14 +92,56 @@ def instance_path():
     shutil.rmtree(path)
 
 
+@pytest.fixture
+def isolated_database_uri():
+    uri = make_url(os.environ['SQLALCHEMY_DATABASE_URI'])
+    uri = uri.set(database='oaiharvester_ut_' + uuid.uuid4().hex)
+    value = uri.render_as_string(hide_password=False)
+    if database_exists(value):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(value)
+    try:
+        yield value
+    finally:
+        drop_database(value)
+
+
+@pytest.fixture
+def versioning_listeners():
+    """Release only the global versioning listeners installed by this app."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
 @pytest.fixture()
-def base_app(instance_path):
+def base_app(instance_path, isolated_database_uri, versioning_listeners):
     """Flask application fixture."""
     app_ = Flask(
         "testapp",
         instance_path=instance_path,
         static_folder=join(instance_path, "static"),
     )
+    resource_prefix = "oaiharvester-ut-" + uuid.uuid4().hex + "-"
     app_.config.update(
         CELERY_ALWAYS_EAGER=True,
         CELERY_CACHE_BACKEND="memory",
@@ -102,18 +152,23 @@ def base_app(instance_path):
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #     'SQLALCHEMY_DATABASE_URI',
         #     'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=isolated_database_uri,
+        CACHE_REDIS_URL=os.environ['CACHE_REDIS_URL'],
+        CACHE_REDIS_HOST=os.environ['CACHE_REDIS_HOST'],
+        CACHE_REDIS_DB=0,
+        CACHE_KEY_PREFIX=resource_prefix,
+        WEKO_SCHEMA_CACHE_PREFIX=resource_prefix + "schema-{schema_name}",
         TESTING=True,
         INDEX_IMG='indextree/36466818-image.jpg',
-        INDEXER_DEFAULT_INDEX="{}-weko-item-v1.0.0".format("test"),
-        SEARCH_UI_SEARCH_INDEX="{}-weko".format("test"),
+        INDEXER_DEFAULT_INDEX="weko-item-v1.0.0",
+        SEARCH_UI_SEARCH_INDEX="weko",
         SERVER_NAME="TEST_SERVER",
         SEARCH_OPENSEARCH_HOSTS="opensearch",
         SEARCH_HOSTS=os.environ.get('SEARCH_HOST', 'opensearch'),
         SEARCH_CLIENT_CONFIG={"http_auth":(os.environ['INVENIO_OPENSEARCH_USER'],os.environ['INVENIO_OPENSEARCH_PASS']),"use_ssl":True, "verify_certs":False},
-        SEARCH_INDEX_PREFIX="test-",
+        SEARCH_INDEX_PREFIX=resource_prefix,
         INDEXER_FILE_DOC_TYPE='content',
+        PIDRELATIONS_RELATION_TYPES=PIDRELATIONS_RELATION_TYPES,
         WEKO_BUCKET_QUOTA_SIZE=50 * 1024 * 1024 * 1024,
         WEKO_MAX_FILE_SIZE=50 * 1024 * 1024 * 1024,
         FILES_REST_DEFAULT_STORAGE_CLASS='S',
@@ -126,27 +181,40 @@ def base_app(instance_path):
         WEKO_SCHEMA_DDI_SCHEMA_NAME='ddi_mapping',
         WEKO_PERMISSION_SUPER_ROLE_USER=WEKO_PERMISSION_SUPER_ROLE_USER,
     )
-    FlaskCeleryExt(app_)
-    InvenioAccounts(app_)
-    InvenioAccess(app_)
-    InvenioCache(app_)
-    InvenioDB(app_)
-    InvenioDeposit(app_)
-    InvenioI18N(app_)
-    InvenioPIDStore(app_)
-    InvenioJSONSchemas(app_)
-    InvenioPIDRelations(app_)
-    InvenioFilesREST(app_)
-    InvenioSearch(app_)
-    InvenioRecords(app_)
-    InvenioRecordsREST(app_)
-    WekoSearchUI(app_)
-    WekoTheme(app_)
-    WekoDeposit(app_)
-    WekoRecords(app_)
-    InvenioOAIHarvester(app_)
+    try:
+        FlaskCeleryExt(app_)
+        InvenioAccounts(app_)
+        InvenioAccess(app_)
+        InvenioCache(app_)
+        InvenioDB(app_)
+        InvenioDeposit(app_)
+        InvenioI18N(app_)
+        InvenioPIDStore(app_)
+        InvenioJSONSchemas(app_)
+        InvenioPIDRelations(app_)
+        InvenioFilesREST(app_)
+        InvenioSearch(app_)
+        InvenioRecords(app_)
+        InvenioRecordsREST(app_)
+        WekoSearchUI(app_)
+        WekoTheme(app_)
+        WekoDeposit(app_)
+        WekoRecords(app_)
+        InvenioOAIHarvester(app_)
 
-    return app_
+        yield app_
+    finally:
+        if 'sqlalchemy' in app_.extensions:
+            with app_.app_context():
+                db_.session.remove()
+                db_.engine.dispose()
+        redis = Redis.from_url(app_.config['CACHE_REDIS_URL'])
+        try:
+            keys = list(redis.scan_iter(match=resource_prefix + '*'))
+            if keys:
+                redis.delete(*keys)
+        finally:
+            redis.close()
 
 
 @pytest.yield_fixture()
@@ -163,30 +231,29 @@ def client(app):
 
 @pytest.fixture()
 def db(app):
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.drop_all()
 
 
 @pytest.fixture()
 def search_index(app):
-    current_search_client.indices.delete(index='test-*')
-    with open("tests/data/item-v1.0.0.json","r") as f:
+    with open("tests/data/item-v1.0.0.json", "r") as f:
         mapping = json.load(f)
+    index = build_alias_name(app.config["INDEXER_DEFAULT_INDEX"])
+    created = False
     try:
-        current_search_client.indices.create(app.config["INDEXER_DEFAULT_INDEX"],body=mapping)
-        current_search_client.indices.put_alias(index=app.config["INDEXER_DEFAULT_INDEX"], name="test-weko")
-    except:
-        current_search_client.indices.create("test-weko-items",body=mapping)
-        current_search_client.indices.put_alias(index="test-weko-items", name="test-weko")
-
-    try:
+        current_search_client.indices.create(index, body=mapping)
+        created = True
+        current_search_client.indices.put_alias(
+            index=index, name=build_alias_name(app.config["SEARCH_UI_SEARCH_INDEX"]))
         yield current_search_client
     finally:
-        current_search_client.indices.delete(index='test-*')
+        if created:
+            current_search_client.indices.delete(index=index)
 
 
 @pytest.fixture()
@@ -388,17 +455,18 @@ def location(app, db):
     """Create default location."""
     tmppath = tempfile.mkdtemp()
 
-    location = Location.query.filter_by(name="testloc").count()
-    if location != 1:
-        loc = Location(name="testloc", uri=tmppath, default=True)
-        db.session.add(loc)
-        db.session.commit()
-    else:
-        loc = Location.query.filter_by(name="testloc").first()
+    try:
+        location = Location.query.filter_by(name="testloc").count()
+        if location != 1:
+            loc = Location(name="testloc", uri=tmppath, default=True)
+            db.session.add(loc)
+            db.session.commit()
+        else:
+            loc = Location.query.filter_by(name="testloc").first()
 
-    yield loc
-
-    shutil.rmtree(tmppath)
+        yield loc
+    finally:
+        shutil.rmtree(tmppath)
 
 
 @pytest.fixture()
@@ -574,6 +642,10 @@ def db_itemtype(app, db):
     item_type_multiple_mapping = dict()
     with open("tests/data/itemtype_multiple_mapping.json", "r") as f:
         item_type_multiple_mapping = json.load(f)
+
+    for value in item_type_multiple_mapping.values():
+        if isinstance(value, dict) and "jpcoar_mapping" in value:
+            value["jpcoar_v1_mapping"] = copy.deepcopy(value["jpcoar_mapping"])
 
     item_type_multiple = ItemType(
         id=10,
@@ -862,7 +934,7 @@ def create_record(db, record_data, item_data):
     return recid, depid, record, item, parent, doi, deposit
 
 @pytest.fixture()
-def db_records(app,db):
+def db_records(app,db,db_oaischema,users):
     record_datas = list()
     with open("tests/data/test_record/record_metadata.json") as f:
         record_datas = json.load(f)
