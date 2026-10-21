@@ -172,7 +172,9 @@ def test_item_changes_search_factory_except_baseexception(monkeypatch):
         def update_from_dict(self, q):
             pass
     # Mock json.dumps to raise TypeError
-    monkeypatch.setattr(query_mod.json, "dumps", lambda *a, **k: (_ for _ in ()).throw(TypeError("dummy")))
+    faulty_json = Mock(wraps=json)
+    faulty_json.dumps.side_effect = TypeError("dummy")
+    monkeypatch.setattr(query_mod, "json", faulty_json)
     # Mock Indexes.get_list_path_publish
     monkeypatch.setattr(query_mod.Indexes, "get_list_path_publish", lambda idx: ["dummy"])
     app = Flask(__name__)
@@ -182,6 +184,7 @@ def test_item_changes_search_factory_except_baseexception(monkeypatch):
         # Confirm that the exception is suppressed and the function returns normally
         result = query_mod.item_changes_search_factory(search, index_id=1)
         assert result is not None
+        faulty_json.dumps.assert_called_once()
 
 def test_item_changes_search_factory_except_syntaxerror(monkeypatch):
     from invenio_resourcesyncserver import query as query_mod

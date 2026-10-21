@@ -758,10 +758,11 @@ def test_get_capability_content_ChangeListHandler(i18n_app):
 #     def _date_validation(self, date_from: str):
 def test__date_validation_ChangeListHandler(i18n_app):
     test_str = sample_ChangeListHandler("str")
-    test_str.publish_date = datetime.datetime.now() - datetime.timedelta(days=5)
-    date_from = "20221107"
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    test_str.publish_date = now - datetime.timedelta(days=5)
+    date_from = (now - datetime.timedelta(days=1)).strftime("%Y%m%d")
 
-    assert test_str._date_validation(date_from)
+    assert test_str._date_validation(date_from) == datetime.datetime.strptime(date_from, "%Y%m%d")
 
     date_from = "test"
 
