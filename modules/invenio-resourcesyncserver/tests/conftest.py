@@ -56,7 +56,6 @@ from invenio_communities.models import Community
 from invenio_communities.views.ui import blueprint as invenio_communities_blueprint
 from invenio_db import InvenioDB
 from invenio_db import db as db_
-from invenio_db.utils import drop_alembic_version_table
 from invenio_deposit.api import Deposit
 from invenio_files_rest.models import Location
 from invenio_i18n import InvenioI18N
@@ -82,21 +81,21 @@ from invenio_resourcesyncserver.views import blueprint as resourcesyncserver_blu
 from invenio_rest import InvenioREST
 from invenio_search import InvenioSearch, RecordsSearch
 from invenio_stats import InvenioStats
-from invenio_stats.config import SEARCH_INDEX_PREFIX as index_prefix
 from invenio_records.models import RecordMetadata
 from invenio_search import current_search_client, current_search
-from invenio_search.engine import search as search_engine
+from invenio_search.utils import build_alias_name
 from invenio_queues.proxies import current_queues
 
 from io import BytesIO
 from os.path import join
 from simplekv.memory.redisstore import RedisStore
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
 from sqlalchemy import event
-from sqlalchemy_utils.functions import create_database, database_exists, drop_database
+from sqlalchemy_utils.functions import create_database, drop_database
 from tests.helpers import create_record, json_data
-from time import sleep
 from unittest.mock import Mock, patch
 
 from weko_admin import WekoAdmin
@@ -191,10 +190,40 @@ def instance_path():
     shutil.rmtree(path)
 
 
+@pytest.fixture
+def versioning_listeners():
+    """Release only the global versioning listeners installed by this app."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
 @pytest.fixture()
-def base_app(instance_path, request):
+def base_app(instance_path, request, search_class, versioning_listeners):
     """Flask application fixture."""
     app_ = Flask('testapp', instance_path=instance_path, static_folder=join(instance_path, "static"),)
+    database_uri = make_url(os.environ["SQLALCHEMY_DATABASE_URI"]).set(
+        database="resyncserver_ut_" + uuid.uuid4().hex)
+    resource_prefix = "resyncserver-ut-" + uuid.uuid4().hex + "-"
     os.environ['INVENIO_WEB_HOST_NAME']="127.0.0.1"
     app_.config.update(
         ACCOUNTS_JWT_ENABLE=True,
@@ -216,20 +245,18 @@ def base_app(instance_path, request):
             "CACHE_REDIS_URL", "redis://redis:6379/0"
         ),
         CACHE_REDIS_DB='0',
-        CACHE_REDIS_HOST="redis",
-        WEKO_INDEX_TREE_STATE_PREFIX="index_tree_expand_state",
+        CACHE_REDIS_HOST=os.environ["CACHE_REDIS_HOST"],
+        CACHE_KEY_PREFIX=resource_prefix,
+        WEKO_INDEX_TREE_STATE_PREFIX=resource_prefix + "index_tree_expand_state",
         WEKO_INDEX_TREE_DEFAULT_DISPLAY_NUMBER = 5,
         REDIS_PORT='6379',
         DEPOSIT_DEFAULT_JSONSCHEMA=DEPOSIT_DEFAULT_JSONSCHEMA,
         SERVER_NAME='TEST_SERVER',
         LOGIN_DISABLED=False,
         INDEXER_FILE_DOC_TYPE='content',
-        INDEXER_DEFAULT_INDEX="{}-weko-item-v1.0.0".format(
-            'test'
-        ),
+        INDEXER_DEFAULT_INDEX="weko-item-v1.0.0",
         INDEX_IMG='indextree/36466818-image.jpg',
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_uri.render_as_string(hide_password=False),
 
         SEARCH_OPENSEARCH_HOSTS=os.environ.get(
                     'SEARCH_OPENSEARCH_HOSTS', 'opensearch'),
@@ -241,7 +268,7 @@ def base_app(instance_path, request):
         JSONSCHEMAS_HOST='inveniosoftware.org',
         ACCOUNTS_USERINFO_HEADERS=True,
         I18N_LANGUAGES=[("ja", "Japanese"), ("en", "English")],
-        WEKO_INDEX_TREE_INDEX_LOCK_KEY_PREFIX="lock_index_",
+        WEKO_INDEX_TREE_INDEX_LOCK_KEY_PREFIX=resource_prefix + "lock_index_",
         WEKO_PERMISSION_SUPER_ROLE_USER=WEKO_PERMISSION_SUPER_ROLE_USER,
         WEKO_PERMISSION_ROLE_COMMUNITY=WEKO_PERMISSION_ROLE_COMMUNITY,
         EMAIL_DISPLAY_FLG=EMAIL_DISPLAY_FLG,
@@ -255,7 +282,7 @@ def base_app(instance_path, request):
         },
         FILES_REST_OBJECT_KEY_MAX_LEN = 255,
         SEARCH_UI_SEARCH_INDEX="weko",
-        SEARCH_INDEX_PREFIX="{}-".format('test'),
+        SEARCH_INDEX_PREFIX=resource_prefix,
         OAISERVER_ID_PREFIX="oai:inveniosoftware.org:recid/",
         OAISERVER_RECORD_INDEX="_all",
         OAISERVER_REGISTER_SET_SIGNALS=True,
@@ -289,7 +316,7 @@ def base_app(instance_path, request):
         WEKO_ADMIN_CACHE_TEMP_DIR_INFO_KEY_DEFAULT = 'cache::temp_dir_info',
         WEKO_ITEMS_UI_EXPORT_TMP_PREFIX = 'weko_export_',
         WEKO_SEARCH_UI_IMPORT_TMP_PREFIX = 'weko_import_',
-        WEKO_AUTHORS_SEARCH_INDEX_NAME = "{}-authors".format(index_prefix),
+        WEKO_AUTHORS_SEARCH_INDEX_NAME=resource_prefix + "authors",
         WEKO_HANDLE_ALLOW_REGISTER_CNRI = True,
         WEKO_PERMISSION_ROLE_USER = ['System Administrator',
                              'Repository Administrator',
@@ -522,7 +549,7 @@ def base_app(instance_path, request):
                 pid_fetcher='recid',
                 pid_value='1.0',
                 search_class=RecordsSearch,
-                search_index="test-weko",
+                search_index="weko",
                 search_type='item-v1.0.0',
                 search_factory_imp='weko_search_ui.query.weko_search_factory',
                 record_serializers={
@@ -568,22 +595,34 @@ def base_app(instance_path, request):
         WEKO_SEARCH_UI_TO_NUMBER_FORMAT = "99999999999999.99",
         WEKO_SEARCH_UI_BASE_TEMPLATE=WEKO_SEARCH_UI_BASE_TEMPLATE,
     )
+
+    def clear_test_cache():
+        from redis import Redis
+        cache = Redis.from_url(app_.config["CACHE_REDIS_URL"])
+        try:
+            for key in cache.scan_iter(match=resource_prefix + "*"):
+                cache.delete(key)
+        finally:
+            cache.close()
+            cache.connection_pool.disconnect()
+
+    request.addfinalizer(clear_test_cache)
     app_.url_map.converters['pid'] = PIDConverter
     app_.config['RECORDS_REST_ENDPOINTS']['recid']['search_class'] = search_class
 
     # Parameterize application.
     if hasattr(request, 'param'):
         if 'endpoint' in request.param:
-            app.config['RECORDS_REST_ENDPOINTS']['recid'].update(
+            app_.config['RECORDS_REST_ENDPOINTS']['recid'].update(
                 request.param['endpoint'])
         if 'records_rest_endpoints' in request.param:
-            original_endpoint = app.config['RECORDS_REST_ENDPOINTS']['recid']
-            del app.config['RECORDS_REST_ENDPOINTS']['recid']
+            original_endpoint = app_.config['RECORDS_REST_ENDPOINTS']['recid']
+            del app_.config['RECORDS_REST_ENDPOINTS']['recid']
             for new_endpoint_prefix, new_endpoint_value in \
                     request.param['records_rest_endpoints'].items():
                 new_endpoint = dict(original_endpoint)
                 new_endpoint.update(new_endpoint_value)
-                app.config['RECORDS_REST_ENDPOINTS'][new_endpoint_prefix] = \
+                app_.config['RECORDS_REST_ENDPOINTS'][new_endpoint_prefix] = \
                     new_endpoint
 
     FlaskCeleryExt(app_)
@@ -644,51 +683,48 @@ def client_api(app):
 @pytest.fixture()
 def db(app):
     """Get setup database."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
-    drop_alembic_version_table()
+    uri = db_.engine.url
+    create_database(uri)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(uri)
 
 
 @pytest.fixture()
 def search(app):
-    """Search fixture."""
+    """Create registered indices only inside this app's namespace."""
+    client = current_search_client._get_current_object()
     try:
-        current_search_client.indices.delete(index='test-*')
         list(current_search.create())
-    except search_engine.exceptions.RequestError:
-        list(current_search.delete(ignore=[404]))
-        list(current_search.create(ignore=[400]))
-    current_search_client.indices.refresh()
-    yield current_search_client
-    list(current_search.delete(ignore=[404]))
+        client.indices.refresh(index=app.config["SEARCH_INDEX_PREFIX"] + "*")
+        yield client
+    finally:
+        names = client.indices.get(index=app.config["SEARCH_INDEX_PREFIX"] + "*", ignore=[404])
+        for name in names:
+            if name.startswith(app.config["SEARCH_INDEX_PREFIX"]):
+                client.indices.delete(index=name)
+        client.close()
 
 
 @pytest.fixture()
 def search_index(app):
-    current_search_client.indices.delete(index="test-*")
     with open("tests/data/item-v1.0.0.json", "r") as f:
         mapping = json.load(f)
+    index = build_alias_name(app.config["INDEXER_DEFAULT_INDEX"])
+    client = current_search_client._get_current_object()
     try:
-        current_search_client.indices.create(
-            app.config["INDEXER_DEFAULT_INDEX"], body=mapping
-        )
-        current_search_client.indices.put_alias(
-            index=app.config["INDEXER_DEFAULT_INDEX"], name="test-weko"
-        )
-    except:
-        current_search_client.indices.create("test-weko-items", body=mapping)
-        current_search_client.indices.put_alias(
-            index="test-weko-items", name="test-weko"
-        )
-
-    try:
-        yield current_search_client
+        client.indices.create(index=index, body=mapping)
+        try:
+            client.indices.put_alias(index=index, name=build_alias_name(app.config["SEARCH_UI_SEARCH_INDEX"]))
+            yield client
+        finally:
+            client.indices.delete(index=index)
     finally:
-        current_search_client.indices.delete(index="test-*")
+        client.close()
 
 
 @pytest.yield_fixture()
@@ -956,15 +992,15 @@ def db_itemtype(app, db):
 
 
 @pytest.fixture()
-def location(app, db):
+def location(app, db, instance_path):
     """Create default location."""
-    tmppath = tempfile.mkdtemp()
+    tmppath = instance_path
     with db.session.begin_nested():
         Location.query.delete()
         loc = Location(name='local', uri=tmppath, default=True)
         db.session.add(loc)
     db.session.commit()
-    return location
+    return loc
 
 
 @pytest.fixture()
@@ -1019,7 +1055,7 @@ def db_index(client, users):
 
 
 @pytest.fixture()
-def search_records(app, db, db_index, location, db_itemtype, db_oaischema):
+def search_records(app, db, db_index, location, db_itemtype, db_oaischema, search_index):
     indexer = WekoIndexer()
     indexer.get_search_index()
     results = []
@@ -1062,8 +1098,8 @@ def search_records(app, db, db_index, location, db_itemtype, db_oaischema):
 
             results.append({"depid":depid, "recid":recid, "parent": parent, "doi":doi, "hdl": hdl,"record":record, "record_data":record_data,"item":item , "item_data":item_data,"deposit": deposit})
 
-    sleep(3)
-    open_search = search_engine.client.OpenSearch("http://{}:9200".format(app.config["SEARCH_OPENSEARCH_HOSTS"]))
+    db.session.commit()
+    search_index.indices.refresh(index=build_alias_name(app.config["INDEXER_DEFAULT_INDEX"]))
     return {
         "indexer": indexer,
         "results": results

@@ -15,6 +15,7 @@ from invenio_resourcesyncserver.query import (
     item_changes_search_factory
 )
 from invenio_search import current_search
+from invenio_search.utils import build_alias_name
 from invenio_search.engine import search
 from unittest.mock import patch, MagicMock, Mock
 
@@ -33,7 +34,7 @@ def test_get_items_by_index_tree(i18n_app, indices, search_index):
     def _generate_search_data(num, start_datetime=datetime.datetime.now()):
         for i in range(num):
             doc = {
-                "_index": i18n_app.config['INDEXER_DEFAULT_INDEX'],
+                "_index": build_alias_name(i18n_app.config['INDEXER_DEFAULT_INDEX']),
                 "_type": "item-v1.0.0",
                 "_id": f"2d1a2520-9080-437f-a304-230adc8{i:05d}",
                 "_source": {
@@ -52,7 +53,8 @@ def test_get_items_by_index_tree(i18n_app, indices, search_index):
             yield doc
 
     generate_data_num = 20002
-    search.helpers.bulk(search_index, _generate_search_data(generate_data_num), refresh='true')
+    search.helpers.bulk(search_index, _generate_search_data(generate_data_num), request_timeout=60)
+    search_index.indices.refresh(index=build_alias_name(i18n_app.config['INDEXER_DEFAULT_INDEX']))
 
     # result over 10000
     assert len(get_items_by_index_tree(66)) == generate_data_num
