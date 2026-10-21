@@ -17,10 +17,12 @@ import os
 import pytest
 import shutil
 import tempfile
+import uuid
 
 from flask import Flask
 from flask_admin import Admin
 from flask_babel import Babel
+from importlib_resources import files
 from datetime import datetime, timedelta
 
 from invenio_access import InvenioAccess
@@ -34,9 +36,16 @@ from invenio_db import InvenioDB, db as db_
 from invenio_files_rest import InvenioFilesREST
 from invenio_files_rest.models import ObjectVersion,Bucket, Location
 from invenio_search import InvenioSearch, current_search, current_search_client
+from invenio_search.utils import build_alias_name
 from invenio_stats import InvenioStats
 from PIL import Image
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
+from redis import Redis
 from tests.helpers import create_record, json_data
 from uuid import UUID
 from mock import patch, MagicMock
@@ -89,26 +98,66 @@ def instance_path():
     shutil.rmtree(path)
 
 
+@pytest.fixture
+def isolated_database_uri():
+    uri = make_url(os.environ['SQLALCHEMY_DATABASE_URI'])
+    uri = uri.set(database='gridlayout_ut_' + uuid.uuid4().hex)
+    value = uri.render_as_string(hide_password=False)
+    if database_exists(value):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(value)
+    try:
+        yield value
+    finally:
+        drop_database(value)
+
+
+@pytest.fixture
+def versioning_listeners():
+    """Release only the global versioning listeners installed by this app."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
 @pytest.fixture()
-def base_app(instance_path):
+def base_app(instance_path, isolated_database_uri, versioning_listeners):
     app_ = Flask("testapp", instance_path=instance_path)
+    resource_prefix = "gridlayout-ut-" + uuid.uuid4().hex + "-"
     app_.config.update(
-        # SQLALCHEMY_DATABASE_URI=os.environ.get(
-        #     'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                           'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=isolated_database_uri,
         TESTING=True,
         BASE_TEMPLATE = 'weko_gridlayout/base.html',
         WEKO_GRIDLAYOUT_BASE_TEMPLATE = 'weko_gridlayout/base.html',
         WEKO_GRIDLAYOUT_ADMIN_WIDGET_DESIGN = 'weko_gridlayout/admin/widget_design.html',
         SERVER_NAME="TEST_SERVER",
-        SEARCH_INDEX_PREFIX='test-',
+        SEARCH_INDEX_PREFIX=resource_prefix,
         INDEXER_DEFAULT_DOC_TYPE='testrecord',
         SEARCH_UI_SEARCH_INDEX='test-weko',
         SECRET_KEY='SECRET_KEY',
-        CACHE_REDIS_URL='redis://redis:6379/0',
+        CACHE_REDIS_URL=os.environ['CACHE_REDIS_URL'],
+        CACHE_KEY_PREFIX=resource_prefix,
         CACHE_REDIS_DB='0',
-        CACHE_REDIS_HOST='redis',
+        CACHE_REDIS_HOST=os.environ['CACHE_REDIS_HOST'],
         REDIS_PORT='6379',
         WEKO_GRIDLAYOUT_BUCKET_UUID='61531203-4104-4425-a51b-d32881eeab22',
         FILES_REST_DEFAULT_STORAGE_CLASS="S",
@@ -125,22 +174,35 @@ def base_app(instance_path):
         SEARCH_OPENSEARCH_HOSTS = os.environ.get("SEARCH_OPENSEARCH_HOSTS", "opensearch"),
         SEARCH_CLIENT_CONFIG={"http_auth":(os.environ['INVENIO_OPENSEARCH_USER'],os.environ['INVENIO_OPENSEARCH_PASS']),"use_ssl":True, "verify_certs":False}
     )
-    Babel(app_)
-    InvenioDB(app_)
-    InvenioAccounts(app_)
-    InvenioAccess(app_)
-    InvenioFilesREST(app_)
-    WekoGridLayout(app_)
-    InvenioI18N(app_)
-    # InvenioCache(app_)
-    # WekoAdmin(app_)
-    InvenioStats(app_)
-    InvenioCache(app_)
-    InvenioSearch(app_)
-    app_.register_blueprint(blueprint)
-    app_.register_blueprint(blueprint_api)
+    try:
+        Babel(app_)
+        InvenioDB(app_)
+        InvenioAccounts(app_)
+        InvenioAccess(app_)
+        InvenioFilesREST(app_)
+        WekoGridLayout(app_)
+        InvenioI18N(app_)
+        # InvenioCache(app_)
+        # WekoAdmin(app_)
+        InvenioStats(app_)
+        InvenioCache(app_)
+        InvenioSearch(app_)
+        app_.register_blueprint(blueprint)
+        app_.register_blueprint(blueprint_api)
 
-    return app_
+        yield app_
+    finally:
+        if 'sqlalchemy' in app_.extensions:
+            with app_.app_context():
+                db_.session.remove()
+                db_.engine.dispose()
+        redis = Redis.from_url(app_.config['CACHE_REDIS_URL'])
+        try:
+            keys = list(redis.scan_iter(match=resource_prefix + '*'))
+            if keys:
+                redis.delete(*keys)
+        finally:
+            redis.close()
 
 
 @pytest.yield_fixture()
@@ -189,12 +251,12 @@ def client_request_args(app, file_instance_mock):
 @pytest.fixture()
 def db(app):
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
 
 
 @pytest.fixture()
@@ -539,17 +601,37 @@ def communities(app, db, user, indices):
 @pytest.yield_fixture()
 def es(app):
     # top_view aggr
-    aggr_top_view_mapping = json_data("data/mapping/top_view/v6/aggr-top-view-v1.json")
+    mapping_path = files('invenio_stats.contrib.aggregations').joinpath(
+        'os-v2', 'aggregation-v1.json')
+    aggr_top_view_mapping = {
+        'mappings': json.loads(mapping_path.read_text())['mappings']
+    }
     aggr_top_view_mapping.update({'aliases':
-        {'{}stats-top-view'.format(app.config['SEARCH_INDEX_PREFIX']): {'is_write_index': True}}})
-    current_search_client.indices.create(
-        index='{}stats-top-view-0001'.format(app.config['SEARCH_INDEX_PREFIX']),
-        body=aggr_top_view_mapping, ignore=[400, 404]
-    )
+        {'{}stats-index'.format(app.config['SEARCH_INDEX_PREFIX']): {'is_write_index': True}}})
+    index_name = "{}stats-index-0001".format(app.config['SEARCH_INDEX_PREFIX'])
     try:
+        current_search_client.indices.create(
+            index=index_name,
+            body=aggr_top_view_mapping
+        )
         yield current_search_client
     finally:
-        current_search_client.indices.delete(index="test-*")
+        current_search_client.indices.delete(index=index_name, ignore=[404])
+
+
+@pytest.fixture()
+def search_index(app):
+    app.config['SEARCH_UI_SEARCH_INDEX'] = 'records'
+    index_name = build_alias_name(app.config['SEARCH_UI_SEARCH_INDEX'])
+    try:
+        current_search_client.indices.create(index=index_name, body={
+            'mappings': {'properties': {'publish_date': {
+                'type': 'date', 'format': 'yyyy-MM-dd||yyyy-MM||yyyy'
+            }}}
+        })
+        yield current_search_client
+    finally:
+        current_search_client.indices.delete(index=index_name, ignore=[404])
 
 
 @pytest.fixture
@@ -559,15 +641,15 @@ def redis_connect(app):
 
 
 @pytest.fixture()
-def location(app, db):
+def location(app, db, tmp_path):
     """Create default location."""
-    tmppath = tempfile.mkdtemp()
+    tmppath = str(tmp_path)
     with db.session.begin_nested():
         Location.query.delete()
         loc = Location(name="local", uri=tmppath, default=True)
         db.session.add(loc)
     db.session.commit()
-    return location
+    return loc
 
 
 @pytest.fixture
