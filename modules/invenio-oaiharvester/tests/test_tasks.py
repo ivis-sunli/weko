@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from invenio_db import db
 
 from invenio_oaiharvester.errors import InvenioOAIHarvesterError
+from invenio_oaiharvester.harvester import BaseMapper
 from invenio_oaiharvester.models import HarvestSettings,HarvestLogs
 from invenio_oaiharvester.signals import oaiharvest_finished
 from invenio_oaiharvester.tasks import create_indexes, event_counter, \
@@ -39,6 +40,7 @@ from invenio_pidstore.models import PersistentIdentifier, PIDStatus
 from lxml import etree
 from unittest.mock import patch
 from weko_index_tree.models import Index
+from weko_records.models import ItemType
 
 
 # .tox/c1/bin/pytest --cov=invenio_oaiharvester tests/test_tasks.py -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/invenio-oaiharvester/.tox/c1/tmp
@@ -350,7 +352,10 @@ def test_process_item(app, db, search_index, location, db_itemtype, harvest_sett
     _etree = etree.fromstring('<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.openarchives.org/OAI/2.0/ http://www.openarchives.org/OAI/2.0/OAI-PMH.xsd"><responseDate>2023-03-01T02:07:10Z</responseDate><request metadataPrefix="oai_dc" identifier="oai:weko3.example.org:00000021" verb="GetRecord">https://192.168.56.103/oai</request><GetRecord><record><header><identifier>oai:weko3.example.org:00000001</identifier><datestamp>2023-02-20T06:24:47Z</datestamp><setSpec>1557819692844:1557819733276</setSpec><setSpec>1557820086539</setSpec></header><metadata><oai_dc:dc xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:oai_dc="http://www.openarchives.org/OAI/2.0/oai_dc/" xmlns="http://www.w3.org/2001/XMLSchema" xsi:schemaLocation="http://www.openarchives.org/OAI/2.0/oai_dc/ http://www.openarchives.org/OAI/2.0/oai_dc.xsd"><dc:title xml:lang="ja">test full item</dc:title><dc:creator>テスト, 太郎</dc:creator><dc:creator>1</dc:creator><dc:creator>1234</dc:creator><dc:subject>テスト主題</dc:subject><dc:description>this is test abstract.</dc:description><dc:publisher>test publisher</dc:publisher><dc:contributor>test, smith</dc:contributor><dc:contributor>2</dc:contributor><dc:contributor>5678</dc:contributor><dc:date>2022-10-20</dc:date><dc:type>conference paper</dc:type><dc:identifier>1111</dc:identifier><dc:source>test collectibles</dc:source><dc:language>jpn</dc:language><dc:relation>1111111</dc:relation><dc:coverage>1 to 2</dc:coverage><dc:rights>metadata only access</dc:rights><dc:format>text/plain</dc:format></oai_dc:dc></metadata></record></GetRecord></OAI-PMH>')
     _records = _etree.findall('./GetRecord/record', namespaces=_etree.nsmap)
     _counter = {}
-    with patch('weko_search_ui.utils.send_item_created_event_to_search', return_value=None):
+    with patch('weko_search_ui.utils.send_item_created_event_to_search', return_value=None), \
+            monkeypatch.context() as type_config:
+        type_config.setitem(BaseMapper.itemtype_map, 'Multiple',
+                            ItemType.query.filter_by(id=12).one())
         res = process_item(_records[0], harvest_setting[2], _counter, None)
         assert res==None
 
