@@ -735,7 +735,8 @@ def test_find_rss_value(i18n_app, keyword, item_type):
             },
             "_item_metadata": {
                 "item_title": "item_title",
-                "control_number": "9999"
+                "control_number": "9999",
+                "item_type_id": item_type.id
             }
         }
     }
@@ -800,25 +801,24 @@ def test_get_rss_data_source(i18n_app):
     
 
 # def get_search_result_by_date(start_date, end_date):
-def test_get_search_result_by_date(i18n_app):
+def test_get_search_result_by_date(i18n_app, search_index):
     from opensearchpy.exceptions import NotFoundError
 
     start_date = "2021-11-11"
     end_date = "2021-11-22"
 
-    assert get_search_result_by_date(start_date, end_date)
+    result = get_search_result_by_date(start_date, end_date)
+    assert result
+    assert result['hits']['hits'] == []
 
-    with patch('weko_gridlayout.utils.item_search_factory', side_effect=NotFoundError('')):
+    with patch('weko_gridlayout.utils.item_search_factory', side_effect=NotFoundError(404, 'missing', {})):
         # Exception coverage ~ line 779
-        try:
-            get_search_result_by_date(start_date, end_date)
-        except:
-            pass
+        assert get_search_result_by_date(start_date, end_date) is None
     
 
 # def validate_main_widget_insertion(repository_id, new_settings, page_id=0):
 def test_validate_main_widget_insertion(i18n_app, widget_item):
-    repository_id = 1
+    repository_id = "1"
     new_settings = ""
     return_data = MagicMock()
 

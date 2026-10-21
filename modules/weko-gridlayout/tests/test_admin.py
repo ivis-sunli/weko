@@ -10,6 +10,7 @@ import json
 import pytest
 from mock import patch, MagicMock
 from flask import url_for
+from urllib.parse import parse_qs, urlparse
 from flask_admin.contrib.sqla import ModelView
 from flask_admin.model.base import ViewArgs
 from invenio_accounts.testutils import login_user_via_session
@@ -146,12 +147,17 @@ def test_sort_url(app, client, admin_view, view_instance,
     with patch("weko_gridlayout.admin.WidgetSettingView._get_list_extra_args", return_value=view_args):
         with patch("weko_gridlayout.admin.WidgetSettingView.get_list", return_value=(1, widget_item)):
             index_view_url = url_for("widgetitem.index_view")
-            res = client.get(index_view_url)
+            with patch.object(view, 'render', wraps=view.render) as render:
+                res = client.get(index_view_url)
             assert res.status_code == 200
+            sort_url = render.call_args.kwargs['sort_url']
+            query = parse_qs(urlparse(sort_url(1, invert=invert, desc=desc)).query)
             if not desc and invert and not sort_desc:
-                assert view.desc == 1
+                expected_desc = 1
             else:
-                assert view.desc == desc
+                expected_desc = desc
+            assert query['sort'] == ['1']
+            assert query.get('desc', ['0']) == [str(expected_desc or 0)]
 
 
 @pytest.mark.parametrize("page_size",
@@ -238,8 +244,9 @@ def test_preview_view_WidgetDesign(i18n_app, view_instance):
 
 
 # WidgetSettingView.index_view ~ ERROR
-def test_index_view_WidgetSettingView(i18n_app, view_instance):
-    assert view_instance.index_view() != None
+def test_index_view_WidgetSettingView(i18n_app, view_instance, admin_view, client):
+    res = client.get(url_for("widgetitem.index_view"))
+    assert res.status_code == 200
 
 
 # WidgetSettingView.create_view ~ ERROR

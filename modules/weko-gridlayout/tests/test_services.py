@@ -619,9 +619,12 @@ def test__update_main_layout_id_for_widget(i18n_app, db):
     db.session.add(test)
     db.session.commit()
     with patch("weko_gridlayout.models.WidgetItem.get_id_by_repository_and_type", return_value=["1"]):
-        with patch("weko_gridlayout.models.WidgetItem.get_by_id", return_value=""):
-            with patch("weko_gridlayout.services.WidgetDesignPageServices._update_page_id_for_widget_item_setting", return_value=""):
-                assert WidgetDesignPageServices._update_main_layout_id_for_widget("test")
+        widget = MagicMock(settings={"menu_show_pages": ["0"]})
+        with patch("weko_gridlayout.models.WidgetItem.get_by_id", return_value=widget):
+            target = "weko_gridlayout.services.WidgetDesignPageServices._update_page_id_for_widget_item_setting"
+            with patch(target) as update:
+                assert WidgetDesignPageServices._update_main_layout_id_for_widget("test") is None
+                update.assert_called_once_with(1, widget)
 
 
 #     def _update_main_layout_page_id_for_widget_design( ERR ~

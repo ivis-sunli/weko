@@ -21,7 +21,7 @@ def test_WidgetType_create(i18n_app, db):
     }
 
     assert WidgetType.create(data)
-def test_WidgetType_create_2(i18n_app):
+def test_WidgetType_create_2(i18n_app, db):
     data = {
         "type_id": 1,
         "type_name": "test",
@@ -124,7 +124,7 @@ def test_delete_by_id(i18n_app, widget_items):
     widget_id = "1"
 
     assert WidgetItem.delete_by_id(widget_id, session)
-    assert not WidgetItem.delete_by_id(False, session)
+    assert not WidgetItem.delete_by_id(0, session)
 
 
 # class WidgetMultiLangData(db.Model):

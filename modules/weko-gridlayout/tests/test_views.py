@@ -20,7 +20,7 @@ user_results1 = [
 
 
 # def preload_pages():
-def test_preload_pages(i18n_app):
+def test_preload_pages(i18n_app, db):
     from weko_gridlayout.views import preload_pages
 
     assert preload_pages() == None
@@ -310,7 +310,7 @@ def test_delete_widget_item_issue50978(client, users):
     login_user_via_session(client=client, email=users[3]["email"])
     with patch("weko_gridlayout.views.WidgetItemServices.delete_by_id", return_value={}):
         # no request data
-        res3 = client.post("/admin/delete_widget_item")
+        res3 = client.post("/admin/delete_widget_item", content_type="application/json")
         assert res3.status_code == 400
 
         # invalid request data
@@ -720,10 +720,11 @@ def test_get_access_counter_record(i18n_app, db, es, monkeypatch):
 
     uuid1=uuid.uuid4()
     es.index(
-        index='{}stats-top-view-0001'.format(i18n_app.config['SEARCH_INDEX_PREFIX']),
+        index='{}stats-index-0001'.format(i18n_app.config['SEARCH_INDEX_PREFIX']),
         id=uuid1,
         body={
             "timestamp":"2024-03-08T00:00:00",
+            "event_type": "top-view",
             "unique_id":uuid1,
             "count":1,"unique_count":1,
             "country":None,"hostname":"None",
@@ -734,10 +735,11 @@ def test_get_access_counter_record(i18n_app, db, es, monkeypatch):
     )
     uuid2=uuid.uuid4()
     es.index(
-        index='{}stats-top-view-0001'.format(i18n_app.config['SEARCH_INDEX_PREFIX']),
+        index='{}stats-index-0001'.format(i18n_app.config['SEARCH_INDEX_PREFIX']),
         id=uuid2,
         body={
             "timestamp":"2024-03-09T00:00:00",
+            "event_type": "top-view",
             "unique_id":uuid2,
             "count":3,"unique_count":3,
             "country":None,"hostname":"None",
@@ -748,10 +750,11 @@ def test_get_access_counter_record(i18n_app, db, es, monkeypatch):
     )
     uuid3=uuid.uuid4()
     es.index(
-        index='{}stats-top-view-0001'.format(i18n_app.config['SEARCH_INDEX_PREFIX']),
+        index='{}stats-index-0001'.format(i18n_app.config['SEARCH_INDEX_PREFIX']),
         id=uuid3,
         body={
             "timestamp":"2024-03-09T00:00:00",
+            "event_type": "top-view",
             "unique_id":uuid3,
             "count":5,"unique_count":3,
             "country":None,"hostname":"None",
@@ -775,7 +778,7 @@ def test_get_access_counter_record(i18n_app, db, es, monkeypatch):
                 assert res.status_code==200
                 assert json.loads(res.data) == test
                 args, kwargs = mock_set.call_args
-                assert args[0] == 'access_counter'
+                assert args[0] == 'access_counter_main'
                 assert json.loads(args[1].data) == test
                 assert args[2] == 50
 
@@ -802,7 +805,7 @@ def test_get_access_counter_record(i18n_app, db, es, monkeypatch):
                 assert res.status_code==200
                 assert json.loads(res.data) == test
                 args, kwargs = mock_set.call_args
-                assert args[0] == 'access_counter'
+                assert args[0] == 'access_counter_1'
                 assert json.loads(args[1].data) == test
                 assert args[2] == 50
 
@@ -830,14 +833,13 @@ def test_uploaded_file(client, communities):
     def get_file(filename, community_id):
         return "test"
 
-    with patch('weko_gridlayout.views.WidgetBucket.get_file', return_value=get_file):
+    with patch('weko_gridlayout.views.WidgetBucket.get_file', side_effect=get_file) as get_file_mock:
         res = client.get(
             url_for("weko_gridlayout.uploaded_file", community_id="comm1", filename="file")
         )
-        try:
-            assert res.status_code == 200
-        except:
-            pass
+        assert res.status_code == 200
+        assert res.get_data(as_text=True) == "test"
+        get_file_mock.assert_called_once_with("file", "comm1")
 
 
 # def unlocked_widget():
