@@ -36,38 +36,30 @@ def test_register_handle(app):
                 location=location
             )
 
-    with patch("weko_handle.api.EUDATHandleClient.instantiate_with_credentials", returnvalue=MagicMock()):
-        sample.register_handle(
-            location=None,hdl="test/handle"
-        )
+    mock_client = MagicMock()
+    mock_client.register_handle.return_value = "test/handle"
+    with patch("weko_handle.api.PIDClientCredentials.load_from_JSON") as load_credentials:
+        with patch("weko_handle.api.EUDATHandleClient.instantiate_with_credentials",
+                   return_value=mock_client) as factory:
+            assert sample.register_handle(
+                location=None, hdl="test/handle"
+            ) == "test/handle"
+            factory.assert_called_once_with(load_credentials.return_value)
+            mock_client.register_handle.assert_called_once_with(
+                "test/handle", None, overwrite=False)
 
 def test_delete_handle(app):
     sample = Handle()
 
-    try:
-        sample.delete_handle(
-            hdl=1
-        )
-    except:
-        pass
+    assert sample.delete_handle(hdl=1) is None
 
     # HandleNotFoundException coveraga
     with patch("weko_handle.api.PIDClientCredentials.load_from_JSON", side_effect=HandleNotFoundException()):
-        try:
-            sample.delete_handle(
-                hdl=1
-            )
-        except:
-            pass
+        assert sample.delete_handle(hdl=1) == 1
 
     # AttributeError coveraga
     with patch("weko_handle.api.PIDClientCredentials.load_from_JSON", side_effect=AttributeError()):
-        try:
-            sample.delete_handle(
-                hdl=1
-            )
-        except:
-            pass
+        assert sample.delete_handle(hdl=1) is None
 
 # def get_prefix(self):
 def test_get_prefix(app):
@@ -83,9 +75,8 @@ def test_get_prefix(app):
 
         return load_from_JSON_MagicMock
 
-    data1 = MagicMock()
-    data1.load_from_JSON = load_from_JSON
-
     with app.app_context():
-        with patch("weko_handle.api.PIDClientCredentials", return_value=data1):
-            assert sample.get_prefix() != None
+        with patch("weko_handle.api.PIDClientCredentials.load_from_JSON",
+                   side_effect=load_from_JSON) as load_credentials:
+            assert sample.get_prefix() == "get_prefix"
+            load_credentials.assert_called_once_with(sample.credential_path)

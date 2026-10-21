@@ -34,7 +34,7 @@ def test_index(app, client):
 
 
 # .tox/c1/bin/pytest --cov=weko_handle tests/test_views.py::test_retrieve_handle -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-handle/.tox/c1/tmp
-def test_retrieve_handle(app, client):
+def test_retrieve_handle(app, client, handle_credentials):
     url = url_for(
         "weko_handle.retrieve_handle", format="json", _external=True
     )
@@ -50,6 +50,8 @@ def test_retrieve_handle(app, client):
         assert res.status_code == 200
         res = client.post(url, data={'handle': '123/456'})
         assert res.status_code == 200
+        assert res.get_json() == {"handle": "test"}
+        mock_client.retrieve_handle_record_json.assert_called_once_with('123/456')
         app.config['WEKO_HANDLE_CREDS_JSON_PATH'] = ''
         with pytest.raises(Exception) as e:
             client.post(url, data={'handle': '123/456'})
@@ -57,7 +59,7 @@ def test_retrieve_handle(app, client):
 
 
 # .tox/c1/bin/pytest --cov=weko_handle tests/test_views.py::test_register_handle -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-handle/.tox/c1/tmp
-def test_register_handle(app, client):
+def test_register_handle(app, client, handle_credentials):
     url = url_for(
         "weko_handle.register_handle", format="json", _external=True
     )
@@ -75,17 +77,22 @@ def test_register_handle(app, client):
         assert res.status_code == 200
         res = client.post(url, data={'location': 'http://localhost/records/123'})
         assert res.status_code == 200
+        assert res.get_json() == {"handle": "test"}
+        mock_client.register_handle.assert_called_once_with(
+            '123/0000000123', 'http://localhost/records/123', overwrite=False)
         app.config['WEKO_HANDLE_CREDS_JSON_PATH'] = ''
         res = client.post(url, data={'location': 'http://localhost/records/123'})
         assert res.status_code == 200
 
 
 # .tox/c1/bin/pytest --cov=weko_handle tests/test_views.py::test_delete_handle -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-handle/.tox/c1/tmp
-def test_delete_handle(app, client):
+def test_delete_handle(app, client, handle_credentials):
     url = url_for(
         "weko_handle.delete_handle", format="json", _external=True
     )
-    mock_handle_client = MagicMock(side_effect=MockHandleClient)
+    mock_client = MagicMock()
+    mock_handle_client = MagicMock()
+    mock_handle_client.instantiate_with_credentials.return_value = mock_client
     with patch('weko_handle.api.EUDATHandleClient', mock_handle_client):
         with pytest.raises(Exception) as e:
             client.post(url)
@@ -94,6 +101,8 @@ def test_delete_handle(app, client):
         assert res.status_code == 200
         res = client.post(url, data={'hdl': '123/456'})
         assert res.status_code == 200
+        assert res.get_json() == '123/456'
+        mock_client.delete_handle.assert_called_once_with('123/456')
         app.config['WEKO_HANDLE_CREDS_JSON_PATH'] = ''
         res = client.post(url, data={'hdl': '123/456'})
         assert res.status_code == 200
