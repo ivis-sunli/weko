@@ -328,35 +328,34 @@ def test_record_replace_refs(app, db):
     record = Record.create(
         {"one": {"$ref": "http://nest.ed/A"}, "three": {"$ref": "http://nest.ed/ABC"}}
     )
-    with pytest.raises(ImportError):
-        app.extensions["invenio-records"].loader_cls = json_loader_factory(
-            JSONResolver(plugins=["demo.json_resolver"])
-        )
+    app.extensions["invenio-records"].loader_cls = json_loader_factory(
+        JSONResolver(plugins=["tests.demo.json_resolver"])
+    )
 
-        record.enable_jsonref = False
-        assert record.replace_refs() == record
+    record.enable_jsonref = False
+    assert record.replace_refs() == record
 
-        record.enable_jsonref = True
-        out_json = record.replace_refs()
-        assert out_json != record
+    record.enable_jsonref = True
+    out_json = record.replace_refs()
+    assert out_json != record
 
-    # expected_json = {
-    #     "one": {
-    #         "letter": "A",
-    #         "next": ".",
-    #     },
-    #     "three": {
-    #         "letter": "A",
-    #         "next": {
-    #             "letter": "B",
-    #             "next": {
-    #                 "letter": "C",
-    #                 "next": ".",
-    #             },
-    #         },
-    #     },
-    # }
-    # assert out_json == expected_json
+    expected_json = {
+        "one": {
+            "letter": "A",
+            "next": ".",
+        },
+        "three": {
+            "letter": "A",
+            "next": {
+                "letter": "B",
+                "next": {
+                    "letter": "C",
+                    "next": ".",
+                },
+            },
+        },
+    }
+    assert out_json == expected_json
 
 
 def test_replace_refs_deepcopy(app):
