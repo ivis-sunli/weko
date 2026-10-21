@@ -12,9 +12,11 @@
 
 from datetime import datetime, timedelta
 import hashlib
+import logging
 import os
 import shutil
 import tempfile
+from uuid import uuid4
 from io import BytesIO
 
 import pytest
@@ -34,9 +36,10 @@ from invenio_db.utils import drop_alembic_version_table
 from invenio_i18n import Babel, InvenioI18N
 from invenio_records.models import RecordMetadata
 from invenio_records_files.models import RecordsBuckets
+from sqlalchemy.engine.url import URL, make_url
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.schema import DropConstraint, DropSequence, DropTable
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy_utils.functions import create_database, drop_database
 from invenio_previewer import InvenioPreviewer
 
 from invenio_files_rest import InvenioFilesREST
@@ -80,8 +83,30 @@ def _compile_drop_sequence(element, compiler, **kwargs):
     return compiler.visit_drop_sequence(element) + " CASCADE"
 
 
+@pytest.fixture(scope="session")
+def database_uri():
+    """Own a disposable database; never create tables in the application DB."""
+    configured = os.environ.get("SQLALCHEMY_DATABASE_URI")
+    if configured:
+        url = make_url(configured)
+    else:
+        url = URL.create(
+            "postgresql+psycopg2",
+            username=os.environ["INVENIO_POSTGRESQL_DBUSER"],
+            password=os.environ["INVENIO_POSTGRESQL_DBPASS"],
+            host="postgresql",
+            port=5432,
+        )
+    url = url.set(database="filesrest_test_" + uuid4().hex)
+    create_database(url)
+    try:
+        yield url.render_as_string(hide_password=False)
+    finally:
+        drop_database(url)
+
+
 @pytest.fixture()
-def base_app():
+def base_app(database_uri):
     """Flask application fixture."""
     app_ = Flask("testapp")
     app_.config.update(
@@ -93,11 +118,7 @@ def base_app():
         CELERY_TASK_ALWAYS_EAGER=True,
         CELERY_TASK_EAGER_PROPAGATES=True,
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
-        # SQLALCHEMY_DATABASE_URI=os.environ.get(
-        #     'SQLALCHEMY_DATABASE_URI',
-        #     'sqlite:///:memory:'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                           'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_uri,
         WTF_CSRF_ENABLED=False,
         SERVER_NAME="invenio.org",
         SECURITY_PASSWORD_SALT="TEST_SECURITY_PASSWORD_SALT",
@@ -111,14 +132,31 @@ def base_app():
         THEME_ICONS={"semantic-ui": dict(link="linkify icon")},
     )
 
-    FlaskCeleryExt(app_)
-    InvenioDB(app_)
-    Babel(app_)
-    Menu(app_)
-    InvenioPreviewer(app_)
-    WekoLoggingUserActivity(app_)
-
-    return app_
+    activity_logger = logging.getLogger("user-activity")
+    handlers = list(activity_logger.handlers)
+    level = activity_logger.level
+    remove_session = db_.session.remove
+    engine = None
+    try:
+        FlaskCeleryExt(app_)
+        InvenioDB(app_)
+        with app_.app_context():
+            engine = db_.engine
+        Babel(app_)
+        Menu(app_)
+        InvenioPreviewer(app_)
+        WekoLoggingUserActivity(app_)
+        yield app_
+    finally:
+        with app_.app_context():
+            remove_session()
+            if engine is not None:
+                engine.dispose()
+        for handler in activity_logger.handlers:
+            if handler not in handlers:
+                handler.close()
+        activity_logger.handlers = handlers
+        activity_logger.setLevel(level)
 
 
 @pytest.fixture
@@ -140,13 +178,14 @@ def app(base_app):
 @pytest.fixture
 def db(app):
     """Get setup database."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
-    drop_alembic_version_table()
+    remove_session = db_.session.remove
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        remove_session()
+        db_.drop_all()
+        drop_alembic_version_table()
 
 
 @pytest.fixture
@@ -161,31 +200,33 @@ def dummy_location(db):
     """File system location."""
     tmppath = tempfile.mkdtemp()
 
-    loc = Location(name="testloc", uri=tmppath, default=True)
-    db.session.add(loc)
-    db.session.commit()
+    try:
+        loc = Location(name="testloc", uri=tmppath, default=True)
+        db.session.add(loc)
+        db.session.commit()
 
-    yield loc
-
-    shutil.rmtree(tmppath)
+        yield loc
+    finally:
+        shutil.rmtree(tmppath)
 
 
 @pytest.fixture
 def dummy_s3_location(db):
     tmppath = tempfile.mkdtemp()
-    loc = Location(
-        name="s3",
-        uri=tmppath,
-        access_key="test_access_key",
-        secret_key="test_secret_key",
-        s3_endpoint_url="http://test.s3.com",
-        s3_send_file_directly=True
-    )
-    db.session.add(loc)
-    db.session.commit()
-    yield loc
-
-    shutil.rmtree(tmppath)
+    try:
+        loc = Location(
+            name="s3",
+            uri=tmppath,
+            access_key="test_access_key",
+            secret_key="test_secret_key",
+            s3_endpoint_url="http://test.s3.com",
+            s3_send_file_directly=True
+        )
+        db.session.add(loc)
+        db.session.commit()
+        yield loc
+    finally:
+        shutil.rmtree(tmppath)
 
 
 @pytest.fixture
@@ -205,13 +246,14 @@ def extra_location(db):
     """File system location."""
     tmppath = tempfile.mkdtemp()
 
-    loc = Location(name="extra", uri=tmppath, default=False)
-    db.session.add(loc)
-    db.session.commit()
+    try:
+        loc = Location(name="extra", uri=tmppath, default=False)
+        db.session.add(loc)
+        db.session.commit()
 
-    yield loc
-
-    shutil.rmtree(tmppath)
+        yield loc
+    finally:
+        shutil.rmtree(tmppath)
 
 
 @pytest.fixture
@@ -431,6 +473,16 @@ def admin_user(db):
 
 
 @pytest.fixture
+def system_user(db, admin_user):
+    """An administrator whose role also permits location/version links."""
+    role = Role(name=os.environ.get("INVENIO_ROLE_SYSTEM", "System Administrator"))
+    db.session.add(role)
+    role.users.append(admin_user)
+    db.session.commit()
+    return admin_user
+
+
+@pytest.fixture
 def get_md5():
     """Get MD5 of data."""
 
@@ -467,9 +519,12 @@ def get_sha256():
 @pytest.fixture
 def offload_file_serving(app):
     """Serve a redirect instead of streaming the file."""
+    previous = app.config["FILES_REST_XSENDFILE_ENABLED"]
     app.config["FILES_REST_XSENDFILE_ENABLED"] = True
-    yield app
-    app.config["FILES_REST_XSENDFILE_ENABLED"] = False
+    try:
+        yield app
+    finally:
+        app.config["FILES_REST_XSENDFILE_ENABLED"] = previous
 
 
 @pytest.fixture
