@@ -16,6 +16,7 @@ from wtforms.validators import ValidationError
 from unittest.mock import patch, MagicMock
 from flask import get_flashed_messages
 from sqlalchemy.exc import SQLAlchemyError
+from .testutils import login_user
 
 from invenio_files_rest.admin import require_slug, validate_uri, LocationModelView, FileInstanceModelView
 from invenio_files_rest.models import Bucket, ObjectVersion, Location, FileInstance
@@ -51,7 +52,7 @@ def test_validate_uri(app):
     pytest.raises(ValidationError, validate_uri, TestForm("s3_vh"), TestField("wrong_uri"))
 
 
-def test_admin_views(app, db, dummy_location):
+def test_admin_views(app, db, dummy_location, system_user):
     """Test admin views."""
     app.config["SECRET_KEY"] = "CHANGEME"
     InvenioAdmin(app, permission_factory=None, view_class_factory=lambda x: x)
@@ -61,6 +62,7 @@ def test_admin_views(app, db, dummy_location):
     db.session.commit()
 
     with app.test_client() as client:
+        login_user(client, system_user)
         res = client.get("/admin/bucket/")
         assert res.status_code == 200
         assert str(b1.id) in res.get_data(as_text=True)

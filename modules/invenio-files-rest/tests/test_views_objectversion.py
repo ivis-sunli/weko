@@ -367,7 +367,7 @@ def test_put_fail(client, bucket, permissions, get_sha256,
 
 # .tox/c1/bin/pytest --cov=invenio_files_rest tests/test_views_objectversion.py::test_put_versioning -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/invenio-files-rest/.tox/c1/tmp
 def test_put_versioning(client, bucket_with_record, permissions,
-                        get_json, user_activity_log_partition_table, mocker):
+                        get_json, user_activity_log_partition_table, mocker, system_user):
     """Test versioning feature."""
     bucket = bucket_with_record
     # Prevent session from being removed after request
@@ -378,7 +378,7 @@ def test_put_versioning(client, bucket_with_record, permissions,
     object_url = url_for("invenio_files_rest.object_api", bucket_id=bucket.id, key=key)
 
     # Upload to same key twice
-    login_user(client, permissions["location"])
+    login_user(client, system_user)
     for f in files:
         resp = client.put(object_url, input_stream=BytesIO(f))
         assert resp.status_code == 200

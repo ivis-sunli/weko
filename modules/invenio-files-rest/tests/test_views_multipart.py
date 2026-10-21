@@ -16,7 +16,7 @@ import pytest
 from flask import url_for
 from .testutils import BadBytesIO, login_user
 
-from invenio_files_rest.models import Bucket, MultipartObject, Part
+from invenio_files_rest.models import Bucket, FileInstance, MultipartObject, ObjectVersion, Part
 from invenio_files_rest.tasks import merge_multipartobject
 
 
@@ -514,7 +514,7 @@ def test_post_complete(
     client,
     headers,
     permissions,
-    bucket,
+    bucket_with_record,
     multipart,
     multipart_url,
     parts,
@@ -529,11 +529,14 @@ def test_post_complete(
 
     login_user(client, permissions[user])
 
+    upload_id = str(multipart.upload_id)
+    key = multipart.key
+
     # Mock celery task to emulate real usage.
     def _mock_celery_result():
         yield False
         yield False
-        merge_multipartobject(str(multipart.upload_id))
+        merge_multipartobject(upload_id, version_id=task.delay.call_args[1]["version_id"])
         yield True
 
     result_iter = _mock_celery_result()
@@ -552,7 +555,8 @@ def test_post_complete(
         if res.status_code == 200:
             data = get_json(res)
             assert data["completed"] is True
-            assert task.assert_called_with(str(multipart.upload_id))
+            obj = ObjectVersion.get(bucket_with_record, key)
+            task.delay.assert_called_once_with(upload_id, version_id=str(obj.version_id))
             # Two whitespaces expected to have been sent to client before
             # JSON was sent.
             assert res.data.startswith(b"  {")
@@ -562,6 +566,7 @@ def test_post_complete(
 
             # Object exists
             assert client.get(data["links"]["object"]).status_code == 200
+            assert client.get(data["links"]["object_version"]).status_code == 200
 
 
 # .tox/c1/bin/pytest --cov=invenio_files_rest tests/test_views_multipart.py::test_post_complete_fail -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/invenio-files-rest/.tox/c1/tmp
@@ -757,9 +762,15 @@ def test_already_exhausted_input_stream(
         object_url,
         input_stream=BytesIO(data),
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 500
+    assert resp.get_json()["status"] == 500
+    assert FileInstance.query.count() == 0
+    assert ObjectVersion.query.count() == 0
     resp = client.post(
         object_url,
         input_stream=BytesIO(data),
     )
     assert resp.status_code == 500
+    assert resp.get_json()["status"] == 500
+    assert FileInstance.query.count() == 0
+    assert ObjectVersion.query.count() == 0
