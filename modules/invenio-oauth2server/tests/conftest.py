@@ -15,6 +15,7 @@ import os
 import pytest
 import shutil
 import tempfile
+import uuid
 
 from flask import Flask, url_for
 from flask.cli import ScriptInfo
@@ -34,6 +35,7 @@ from invenio_oauth2server.decorators import require_api_auth, require_oauth_scop
 from invenio_oauth2server.models import Client, Scope, Token
 from invenio_oauth2server.views import server_blueprint, settings_blueprint
 from sqlalchemy_utils.functions import create_database, database_exists, drop_database
+from sqlalchemy.engine.url import make_url
 
 
 from .helpers import create_oauth_client, patch_request
@@ -45,9 +47,62 @@ except ImportError:
 
 
 @pytest.fixture()
-def app(request):
+def versioning_listeners():
+    """Release only global versioning listeners installed by these apps."""
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+    from sqlalchemy.orm import Mapper, Session
+    from sqlalchemy_continuum import versioning_manager
+
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, "before_execute", versioning_manager.track_association_operations),
+        (Engine, "rollback", versioning_manager.clear_connection),
+        (Engine, "set_connection_execution_options", versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+
+    def release_owned():
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+    try:
+        yield release_owned
+    finally:
+        release_owned()
+
+
+@pytest.fixture()
+def app(request, versioning_listeners):
     """Flask application fixture."""
+    database_url = make_url(os.environ["SQLALCHEMY_DATABASE_URI"]).set(
+        database="oauth2server_ut_{}".format(uuid.uuid4().hex))
     instance_path = tempfile.mkdtemp()
+    initialized_apps = []
+    database_owned = False
+
+    def teardown():
+        try:
+            for initialized_app in reversed(initialized_apps):
+                with initialized_app.app_context():
+                    db.session.remove()
+                    db.engine.dispose()
+            if database_owned:
+                drop_database(database_url)
+        finally:
+            shutil.rmtree(instance_path)
+
+    request.addfinalizer(teardown)
 
     def init_app(app):
         app.config.update(
@@ -62,12 +117,7 @@ def app(request):
             SECURITY_PASSWORD_SINGLE_HASH=["plaintext"],
             SECURITY_PASSWORD_SALT="CHANGE_ME_ALSO",
             SECURITY_PASSWORD_SCHEMES=["plaintext"],
-            # SQLALCHEMY_DATABASE_URI=os.getenv(
-            #     "SQLALCHEMY_DATABASE_URI",
-            #     "sqlite:///" + os.path.join(instance_path, "test.db"),
-            # ),
-            SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+            SQLALCHEMY_DATABASE_URI=database_url,
             SQLALCHEMY_TRACK_MODIFICATIONS=True,
             TESTING=True,
             WTF_CSRF_ENABLED=False,
@@ -90,7 +140,11 @@ def app(request):
         InvenioI18N(app)
         Mail(app)
         Menu(app)
+        # UI and API share the global manager. Keep one live registration set
+        # while each real InvenioDB initialization installs its listeners.
+        versioning_listeners()
         InvenioDB(app)
+        initialized_apps.append(app)
         InvenioOAuth2Server(app)
         InvenioI18N(app)
 
@@ -110,19 +164,11 @@ def app(request):
     app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/api": api_app.wsgi_app})
 
     with app.app_context():
-        if str(db.engine.url) != "sqlite://" and not database_exists(
-            str(db.engine.url)
-        ):
-            create_database(str(db.engine.url))
+        if database_exists(database_url):
+            raise RuntimeError("Test database must be newly owned by this fixture")
+        create_database(database_url)
+        database_owned = True
         db.create_all()
-
-    def teardown():
-        with app.app_context():
-            if str(db.engine.url) != "sqlite://":
-                drop_database(str(db.engine.url))
-            shutil.rmtree(instance_path)
-
-    request.addfinalizer(teardown)
 
     def delete_user_from_cache(exception):
         """Delete user from `flask.g` when the request is tearing down.
