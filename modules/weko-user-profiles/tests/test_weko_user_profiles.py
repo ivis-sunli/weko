@@ -39,7 +39,7 @@ def test_version():
     assert __version__
 
 
-def test_init():
+def test_init(versioning_listeners):
     """Test extension initialization."""
     app = Flask('testapp')
     app.config.update(
@@ -53,6 +53,7 @@ def test_init():
     InvenioAccounts(app)
     ext = WekoUserProfiles(app)
     assert 'weko-user-profiles' in app.extensions
+    versioning_listeners()
 
     app = Flask('testapp')
     app.config.update(

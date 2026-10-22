@@ -23,14 +23,22 @@
 import os
 import shutil
 import tempfile
+import uuid
+
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
 
 import pytest
 from flask import Flask, current_app
 from flask_admin import Admin
 from flask_babel import Babel
+from flask_breadcrumbs import Breadcrumbs
 from flask_mail import Mail
 from flask_menu import Menu
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 
 from invenio_access import InvenioAccess
 from invenio_access.models import ActionUsers,ActionRoles
@@ -62,12 +70,45 @@ from weko_user_profiles.admin import user_profile_adminview
 @pytest.fixture()
 def instance_path():
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
+
+
+@pytest.fixture(autouse=True)
+def versioning_listeners():
+    """Release only the versioning listeners installed by this application."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+
+    def cleanup():
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+    try:
+        yield cleanup
+    finally:
+        cleanup()
 
 
 @pytest.fixture()
-def base_app(instance_path):
+def base_app(instance_path, versioning_listeners):
     """Flask application fixture."""
     app_ = Flask(__name__, instance_path=instance_path)
 
@@ -75,14 +116,12 @@ def base_app(instance_path):
         ACCOUNTS_USE_CELERY=False,
         LOGIN_DISABLED=False,
         APP_THEME=["bootstrap3"],
-        THEME_ICONS={},
+        THEME_ICONS={"bootstrap3": {"user": "fa fa-user fa-fw"}},
         SECRET_KEY='testing_key',
         SERVER_NAME='TEST_SERVER.localdomain',
         THEME_SITEURL="https://localhost",
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                           'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
-        # SQLALCHEMY_DATABASE_URI=os.environ.get(
-        #     'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
+        SQLALCHEMY_DATABASE_URI=make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+            database='user_profiles_ut_' + uuid.uuid4().hex),
         TEST_USER_EMAIL='test_user@example.com',
         TEST_USER_PASSWORD='test_password',
         ACCOUNTS_BASE_TEMPLATE="invenio_accounts/base.html",
@@ -114,21 +153,29 @@ def base_app(instance_path):
             "item12": {"order": 16, "visible": False, "label_name": "所属学会役職", "format": "select"},
         }
     )
-    Babel(app_)
-    Mail(app_)
-    Menu(app_)
-    InvenioDB(app_)
-    InvenioAccess(app_)
-    InvenioAccounts(app_)
-    InvenioI18N(app_)
-    WekoUserProfiles(app_)
-    WekoNotifications(app_)
-    WekoAccounts(app_)
-    WekoTheme(app_)
+    try:
+        Babel(app_)
+        Mail(app_)
+        Menu(app_)
+        Breadcrumbs(app_, init_menu=False)
+        InvenioDB(app_)
+        InvenioAccess(app_)
+        InvenioAccounts(app_)
+        InvenioI18N(app_)
+        WekoUserProfiles(app_)
+        WekoNotifications(app_)
+        WekoAccounts(app_)
+        WekoTheme(app_)
 
-    app_.register_blueprint(create_settings_blueprint(app_))
+        app_.register_blueprint(create_settings_blueprint(app_))
 
-    yield app_
+        yield app_
+    finally:
+        if 'sqlalchemy' in app_.extensions:
+            with app_.app_context():
+                db_.session.remove()
+                db_.engine.dispose()
+
 
 @pytest.fixture()
 def app(base_app):
@@ -163,13 +210,17 @@ def register_bp():
 @pytest.fixture()
 def db(app):
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
-    # drop_database(str(db_.engine.url))
+    database_url = db_.engine.url
+    if database_exists(database_url):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
 
 
 @pytest.fixture()
