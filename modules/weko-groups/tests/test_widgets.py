@@ -23,6 +23,7 @@
 
 import pytest
 from mock import patch, MagicMock
+from wtforms import Form, RadioField
 
 from weko_groups.widgets import RadioGroupWidget
 
@@ -31,13 +32,13 @@ from weko_groups.widgets import RadioGroupWidget
 # def __call__(self, field, **kwargs):
 # ERROR ~ AttributeError: 'list' object has no attribute 'default'
 def test___call__(app):
-    test = RadioGroupWidget()
-    subfield = MagicMock()
-    subfield.label = MagicMock()
-    subfield.label.text = "text"
-    subfield.data = "data"
-    subfield.checked = "checked"
+    test = RadioGroupWidget(descriptions={'data': 'description'})
 
-    field = subfield
+    class ExampleForm(Form):
+        option = RadioField(choices=[('data', 'text')], default='data')
 
-    test.__call__(field=[field])
+    field = ExampleForm().option
+    rendered = test(field)
+    assert next(iter(field)).checked
+    assert 'text' in rendered
+    assert 'description' in rendered

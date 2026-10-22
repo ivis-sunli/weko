@@ -135,7 +135,7 @@ def test_group_creation_existing_name(app):
             Group.create(name="test", admins=[g])
 
 
-def test_group_creation_signals(app):
+def test_group_creation_signals(app, mocker):
     """
     Test signals sent after creation.
 
@@ -144,7 +144,7 @@ def test_group_creation_signals(app):
     with app.app_context():
         from weko_groups.models import Group
 
-        Group.called = False
+        mocker.patch.object(Group, 'called', False, create=True)
 
         @event.listens_for(Group, 'after_insert')
         def _receiver(mapper, connection, target):
@@ -152,15 +152,17 @@ def test_group_creation_signals(app):
             assert isinstance(target, Group)
             assert target.name == 'signaltest'
 
-        Group.create(name="signaltest")
-        assert Group.called
-
-        Group.called = False
-        with pytest.raises(IntegrityError):
+        try:
             Group.create(name="signaltest")
-        assert not Group.called
+            assert Group.called
 
-        event.remove(Group, 'after_insert', _receiver)
+            Group.called = False
+            with pytest.raises(IntegrityError):
+                Group.create(name="signaltest")
+            assert not Group.called
+
+        finally:
+            event.remove(Group, 'after_insert', _receiver)
 
 
 def test_group_creation_invalid_data(app):
@@ -1123,10 +1125,7 @@ def test__escape_value(app):
         text = {}
 
         # Exception coverage
-        try:
-            assert test._escape_value(text=text) != None
-        except:
-            pass
+        assert test._escape_value(text=text) == text
 
 
 # def _filter(cls, query, state=MembershipState.ACTIVE, eager=None):
