@@ -42,7 +42,13 @@ from invenio_i18n import InvenioI18N
 from invenio_records_ui import InvenioRecordsUI
 from invenio_records_ui.views import create_blueprint_from_app
 from os.path import dirname, join
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
 from sqlalchemy_utils.functions import create_database, database_exists, drop_database
+from redis import Redis
 
 from weko_admin import WekoAdmin
 from weko_admin.models import SessionLifetime
@@ -66,16 +72,63 @@ def celery_config():
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 
 @pytest.fixture
-def create_app(instance_path):
+def versioning_listeners():
+    """Release only the versioning listeners installed by this application."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
+@pytest.fixture
+def cache_config():
+    """Keep Redis cache data within a per-test namespace."""
+    url = os.environ.get('CACHE_REDIS_URL', 'redis://redis:6379/0')
+    prefix = 'sitemap_ut_' + uuid.uuid4().hex + '::'
+    client = Redis.from_url(url)
+    try:
+        yield dict(CACHE_REDIS_URL=url, CACHE_KEY_PREFIX=prefix)
+    finally:
+        try:
+            keys = list(client.scan_iter(match=prefix + '*'))
+            if keys:
+                client.delete(*keys)
+        finally:
+            client.close()
+
+
+@pytest.fixture
+def create_app(instance_path, cache_config):
     """Application factory fixture."""
     def factory(**config):
         app = Flask('testapp', instance_path=instance_path, static_folder=os.path.join(instance_path, "static"),)
         app.config.update(**config)
+        app.config.update(cache_config)
         Babel(app)
         WekoSitemap(app)
         app.register_blueprint(blueprint)
@@ -84,7 +137,7 @@ def create_app(instance_path):
 
 
 @pytest.fixture
-def base_app(instance_path):
+def base_app(instance_path, cache_config, versioning_listeners):
     app_ = Flask('testapp', instance_path=instance_path, static_folder=os.path.join(instance_path, "static"),)
     app_.config.update({
         "SERVER_NAME": 'TEST_SERVER',
@@ -93,8 +146,8 @@ def base_app(instance_path):
         "SECRET_KEY": 'SECRET_KEY',
         "SECURITY_PASSWORD_SALT": "CHANGE_ME_ALSO",
         "SQLALCHEMY_DATABASE_URI":
-            os.getenv('SQLALCHEMY_DATABASE_URI',
-                    'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+            make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+                database='sitemap_ut_' + uuid.uuid4().hex),
         "SQLALCHEMY_TRACK_MODIFICATIONS": True,
         "SQLALCHEMY_ECHO": False,
         "TESTING": True,
@@ -116,23 +169,31 @@ def base_app(instance_path):
         "FILES_REST_DEFAULT_QUOTA_SIZE": None,
         "FILES_REST_DEFAULT_MAX_FILE_SIZE": None,
     })
-    Babel(app_)
-    Menu(app_)
-    FlaskCeleryExt(app_)
-    InvenioDB(app_)
-    InvenioCache(app_)
-    InvenioAdmin(app_)
-    InvenioAssets(app_)
-    InvenioAccounts(app_)
-    InvenioAccess(app_)
-    InvenioPIDStore(app_)
-    InvenioRecordsUI(app_)
-    InvenioI18N(app_)
-    WekoTheme(app_)
-    WekoAdmin(app_)
-    app_.register_blueprint(blueprint)
-    app_.register_blueprint(create_blueprint_from_app(app_))
-    return app_
+    app_.config.update(cache_config)
+    try:
+        Babel(app_)
+        Menu(app_)
+        FlaskCeleryExt(app_)
+        InvenioDB(app_)
+        InvenioCache(app_)
+        InvenioAdmin(app_)
+        InvenioAssets(app_)
+        InvenioAccounts(app_)
+        InvenioAccess(app_)
+        InvenioPIDStore(app_)
+        InvenioRecordsUI(app_)
+        InvenioI18N(app_)
+        WekoTheme(app_)
+        WekoAdmin(app_)
+        app_.register_blueprint(blueprint)
+        app_.register_blueprint(create_blueprint_from_app(app_))
+        yield app_
+    finally:
+        if 'sqlalchemy' in app_.extensions:
+            with app_.app_context():
+                db_.session.remove()
+                db_.engine.dispose()
+
 
 @pytest.fixture
 def app(base_app):
@@ -144,12 +205,17 @@ def app(base_app):
 @pytest.fixture
 def db(app):
     """Get setup database."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    database_url = db_.engine.url
+    if database_exists(database_url):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
 
 @pytest.fixture
 def client(app):
@@ -300,17 +366,18 @@ def location(app, db):
     """Create default location."""
     tmppath = tempfile.mkdtemp()
 
-    location = Location.query.filter_by(name="testloc").count()
-    if location != 1:
-        loc = Location(name="testloc", uri=tmppath, default=True)
-        db.session.add(loc)
-        db.session.commit()
-    else:
-        loc = Location.query.filter_by(name="testloc").first()
+    try:
+        location = Location.query.filter_by(name="testloc").count()
+        if location != 1:
+            loc = Location(name="testloc", uri=tmppath, default=True)
+            db.session.add(loc)
+            db.session.commit()
+        else:
+            loc = Location.query.filter_by(name="testloc").first()
 
-    yield loc
-
-    shutil.rmtree(tmppath)
+        yield loc
+    finally:
+        shutil.rmtree(tmppath)
 
 
 @pytest.fixture
