@@ -100,7 +100,8 @@ class TestExportLogAdminView():
 
     # def export_user_activity_log(self):
     # .tox/c1/bin/pytest --cov=weko_logging tests/test_admin.py::TestExportLogAdminView::test_export_user_activity_log -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-logging/.tox/c1/tmp
-    def test_export_user_activity_log(self, client, users, db, redis_connect, mock_async_result_factory, mocker):
+    def test_export_user_activity_log(self, client, users, db, redis_connect,
+                                      mock_async_result_factory, mocker, celery_result_meta):
         class MockTaskDelay:
             def __init__(self, task_id):
                 self._id = task_id
@@ -118,8 +119,10 @@ class TestExportLogAdminView():
         res = client.post(url)
         assert res.status_code == 200
         assert json.loads(res.data) == {"code":200,"data":{"task_id":"test_id"}}
+        mock_task.assert_called_once_with()
 
         # Case 2: Task is already ended
+        celery_result_meta('test_id', 'SUCCESS')
         redis_connect.put(UserActivityLogUtils.USER_ACTIVITY_LOG_EXPORT_CACHE_STATUS_KEY, bytes(json.dumps({"task_id": "test_id"}), "utf-8"))
         mock_async_result = mocker.patch("weko_logging.admin.export_all_user_activity_logs.AsyncResult")
         task_mock_data = mock_async_result_factory("test_id", "SUCCESS", "result")
@@ -129,8 +132,12 @@ class TestExportLogAdminView():
         res = client.post(url)
         assert res.status_code == 200
         assert json.loads(res.data) == {"code":200,"data":{"task_id":"test_id"}}
+        mock_async_result.assert_called_once_with('test_id')
+        mock_task.assert_called_once_with()
 
         # Case 3: Task is running
+        celery_result_meta('test_id', 'PENDING')
+        mock_task.reset_mock()
         redis_connect.put(UserActivityLogUtils.USER_ACTIVITY_LOG_EXPORT_CACHE_STATUS_KEY, bytes(json.dumps({"task_id": "test_id"}), "utf-8"))
         mock_async_result = mocker.patch("weko_logging.admin.export_all_user_activity_logs.AsyncResult")
         running_mock_data = mock_async_result_factory("test_id", "PENDING", "result")
@@ -138,6 +145,8 @@ class TestExportLogAdminView():
         res = client.post(url)
         assert res.status_code == 200
         assert json.loads(res.data) == {"code":409,"data":{"message":"Export task is running."}}
+        mock_async_result.assert_called_once_with('test_id')
+        mock_task.assert_not_called()
 
 
     # def check_export_status(self):

@@ -73,7 +73,7 @@ def test_package_export_log(
         with patch("weko_logging.utils.FileInstance.get_by_uri") as mock_get_file_instance:
             mock_get_file_instance.return_value = None
             UserActivityLogUtils.package_export_log()
-        assert str(ex.value) == "FileInstance record not found."
+    assert str(ex.value) == "FileInstance record not found."
 
 
 # UserActivityLogUtils.cancel_export_log(cls)
@@ -182,16 +182,16 @@ def test_delete_log(app, db, user_activity_log_partition_table):
         db.session.commit()
 
     # Case 1: config is None
+    app.config['WEKO_LOGGING_USER_ACTIVITY_DB_SETTING'] = None
     with pytest.raises(Exception) as ex:
         UserActivityLogUtils.delete_log()
-        ex.message == "WEKO_LOGGING_USER_ACTIVITY_DB_SETTING is not set."
+    assert str(ex.value) == "WEKO_LOGGING_USER_ACTIVITY_DB_SETTING is not set."
 
     # Case 2: when or interval is None
-    with patch("weko_logging.utils.current_app") as mock_current_app:
-        mock_current_app.config.get.return_value = {"delete": {}}
-        with pytest.raises(Exception) as ex:
-            UserActivityLogUtils.delete_log()
-            ex.message == "WEKO_LOGGING_USER_ACTIVITY_DB_SETTING.delete.when or interval is not set."
+    app.config['WEKO_LOGGING_USER_ACTIVITY_DB_SETTING'] = {"delete": {}}
+    with pytest.raises(Exception) as ex:
+        UserActivityLogUtils.delete_log()
+    assert str(ex.value) == "WEKO_LOGGING_USER_ACTIVITY_DB_SETTING.delete.when or interval is not set."
 
     # Case 3: when is invalid
     with app.test_request_context():
@@ -200,7 +200,7 @@ def test_delete_log(app, db, user_activity_log_partition_table):
         )
         with pytest.raises(Exception) as ex:
             UserActivityLogUtils.delete_log()
-            ex.message == "WEKO_LOGGING_USER_ACTIVITY_DB_SETTING.delete.when is invalid."
+        assert str(ex.value) == "WEKO_LOGGING_USER_ACTIVITY_DB_SETTING.delete.when is invalid."
 
     # Case 4: delete logs (when: days)
     with app.test_request_context():

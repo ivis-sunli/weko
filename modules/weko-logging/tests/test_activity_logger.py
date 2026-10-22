@@ -160,14 +160,14 @@ def test_log_error_invalid_case(app, client, db, users, caplog, mocker):
             UserActivityLogger.error(
                 operation="INVALID_OPERATION",
                 target_key=expected_target_key)
-            assert "Invalid operation: INVALID_OPERATION" in str(excinfo.value)
+        assert "Invalid operation: INVALID_OPERATION" in str(excinfo.value)
 
         # Test Case 2: target is null and target_key is not null
         with pytest.raises(ValueError) as excinfo:
             UserActivityLogger.error(
                 operation="ITEM_BULK_CREATE",
                 target_key=expected_target_key)
-            assert "target is None and target_key is not None" in str(excinfo.value)
+        assert str(excinfo.value) == "target and target_key must be set together"
 
 # .tox/c1/bin/pytest --cov=weko_logging tests/test_activity_logger.py::test_log_error_no_group_id -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-logging/.tox/c1/tmp
 def test_log_error_no_group_id(
@@ -347,14 +347,14 @@ def test_log_info_invalid_case(app, client, db, users, caplog, mocker):
             UserActivityLogger.info(
                 operation="INVALID_OPERATION",
                 target_key=expected_target_key)
-            assert "Invalid operation: INVALID_OPERATION" in str(excinfo.value)
+        assert "Invalid operation: INVALID_OPERATION" in str(excinfo.value)
 
         # Test Case 2: target is null and target_key is not null
         with pytest.raises(ValueError) as excinfo:
             UserActivityLogger.info(
                 operation="ITEM_BULK_CREATE",
                 target_key=expected_target_key)
-            assert "target is None and target_key is not None" in str(excinfo.value)
+        assert str(excinfo.value) == "target and target_key must be set together"
 
 # .tox/c1/bin/pytest --cov=weko_logging tests/test_activity_logger.py::test_log_info_no_group_id -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-logging/.tox/c1/tmp
 def test_log_info_no_group_id(
@@ -471,7 +471,7 @@ def test_log_other(
             UserActivityLogger.error(
                 operation="ITEM_CREATE",
                 target_key=expected_target_key)
-            assert "Flush error" in str(excinfo.value)
+        assert "Flush error" in str(excinfo.value)
 
 
 # def get_log_group_id(cls, request_info):
