@@ -1,5 +1,6 @@
 import pytest
 from mock import patch, MagicMock
+from io import BytesIO
 
 from invenio_previewer.extensions.xml_prismjs import validate_xml
 
@@ -13,6 +14,7 @@ def test_validate_xml(app):
     assert validate_xml(file=file) == False
 
     file.size = max_file_size - 1
+    file.open.return_value = BytesIO(b'<invalid')
 
     # Exception coverage
     assert validate_xml(file=file) == False

@@ -74,10 +74,8 @@ def test_preview(app):
     file.pid = MagicMock()
     file.pid.pid_value = "9999"
     file.uri = '/'
-    request = MagicMock()
-    request.url_root = "/url_root"
-
     with app.test_request_context():
         with patch("invenio_previewer.extensions.iiif_presentation.validate_json", return_value=False):
-            with patch("flask.request", return_value=request):
-                assert preview(file=file) != None
+            result = preview(file=file)
+            assert result is not None
+            assert 'http://localhost/api/iiif/v2/records/9999/manifest.json' in result

@@ -54,5 +54,6 @@ def test_detect_encoding(testapp, string, confidence, encoding, detect):
 def test_detect_encoding_exception(testapp):
     f = BytesIO("Γκρήκ Στρίνγκ".encode("utf-8"))
 
-    with patch("charset_normalizer.detect", Exception):
+    with patch("charset_normalizer.detect", side_effect=RuntimeError("detection failed")):
         assert detect_encoding(f) is None
+        assert f.tell() == 0
