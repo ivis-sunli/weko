@@ -396,10 +396,10 @@ class TestProfileForm:
             form = ProfileForm()
             
             # Verify storage-related fields are removed
-            assert not hasattr(form, 'access_key')
-            assert not hasattr(form, 'secret_key')
-            assert not hasattr(form, 's3_endpoint_url')
-            assert not hasattr(form, 's3_region_name')
+            assert 'access_key' not in form
+            assert 'secret_key' not in form
+            assert 's3_endpoint_url' not in form
+            assert 's3_region_name' not in form
 
     def test_init_storage_fields_present_when_enabled(self, app):
         """Test that storage fields are present when feature flag is enabled."""
@@ -413,10 +413,10 @@ class TestProfileForm:
             form = ProfileForm()
             
             # Verify storage-related fields are present
-            assert hasattr(form, 'access_key')
-            assert hasattr(form, 'secret_key')
-            assert hasattr(form, 's3_endpoint_url')
-            assert hasattr(form, 's3_region_name')
+            assert 'access_key' in form
+            assert 'secret_key' in form
+            assert 's3_endpoint_url' in form
+            assert 's3_region_name' in form
 
 # def custom_profile_form_factory(profile_cls):
 # .tox/c1/bin/pytest --cov=weko_user_profiles tests/test_forms.py::test_custom_profile_form_factory -vv -s --cov-branch --cov-report=term --cov-report=html --basetemp=/code/modules/weko-user-profiles/.tox/c1/tmp

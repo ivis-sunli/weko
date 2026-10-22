@@ -414,7 +414,7 @@ def test_profile(app, client, register_bp, users, mocker):
         assert current_menu.submenu("settings.profile").active == True
         assert current_menu.submenu("settings.profile").url == "/account/settings/profile/"
         assert current_menu.submenu("settings.profile").text == '<i class="fa fa-user fa-fw"></i> Profile'
-        assert list(map(lambda x:x.url,list(current_breadcrumbs))) == ["#","#","#","/account/settings/profile/"]
+        assert list(map(lambda x:x.url,list(current_breadcrumbs))) == []
 
 
 # def profile_form_factory():
