@@ -85,8 +85,10 @@ from os.path import dirname, exists, join
 from re import T
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Session
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Session, Mapper
+from sqlalchemy_continuum import versioning_manager
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 from unittest.mock import patch
 from weko_admin import WekoAdmin
 from weko_admin.config import WEKO_ADMIN_DEFAULT_ITEM_EXPORT_SETTINGS
@@ -153,7 +155,48 @@ def instance_path():
 
 
 @pytest.fixture()
-def base_app(instance_path):
+def isolated_database_uri():
+    uri = make_url(os.environ['SQLALCHEMY_DATABASE_URI'])
+    uri = uri.set(database='itemtypes_ui_ut_' + uuid.uuid4().hex)
+    value = uri.render_as_string(hide_password=False)
+    if database_exists(value):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(value)
+    try:
+        yield value
+    finally:
+        drop_database(value)
+
+
+@pytest.fixture()
+def versioning_listeners():
+    """Release only the global listeners installed by this application."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
+@pytest.fixture()
+def base_app(instance_path, isolated_database_uri, versioning_listeners):
     """Flask application fixture."""
     app_ = Flask(
         "testapp",
@@ -164,8 +207,7 @@ def base_app(instance_path):
         SECRET_KEY="SECRET_KEY",
         TESTING=True,
         SERVER_NAME="test_server",
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=isolated_database_uri,
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
         ACCOUNTS_USERINFO_HEADERS=True,
         WEKO_PERMISSION_SUPER_ROLE_USER=[
@@ -178,13 +220,15 @@ def base_app(instance_path):
         #  WEKO_ITEMS_UI_BASE_TEMPLATE = 'weko_items_ui/base.html',
         #  WEKO_ITEMS_UI_INDEX_TEMPLATE= 'weko_items_ui/item_index.html',
         CACHE_TYPE="redis",
+        CACHE_REDIS_URL=os.environ['CACHE_REDIS_URL'],
+        CACHE_KEY_PREFIX='itemtypes_ui_ut_' + uuid.uuid4().hex + ':',
         ACCOUNTS_SESSION_REDIS_DB_NO=1,
         CACHE_REDIS_HOST=os.environ.get("INVENIO_REDIS_HOST"),
         REDIS_PORT="6379",
         WEKO_BUCKET_QUOTA_SIZE=50 * 1024 * 1024 * 1024,
         WEKO_MAX_FILE_SIZE=50 * 1024 * 1024 * 1024,
         SEARCH_OPENSEARCH_HOSTS=os.environ.get("INVENIO_ELASTICSEARCH_HOST"),
-        SEARCH_INDEX_PREFIX="{}-".format('test'),
+        SEARCH_INDEX_PREFIX='itemtypes-ui-ut-' + uuid.uuid4().hex + '-',
         SEARCH_CLIENT_CONFIG=dict(timeout=120, max_retries=10),
         OAISERVER_ID_PREFIX="oai:inveniosoftware.org:recid/",
         OAISERVER_RECORD_INDEX="_all",
@@ -215,7 +259,7 @@ def base_app(instance_path):
         FILES_REST_DEFAULT_QUOTA_SIZE=None,
         FILES_REST_DEFAULT_MAX_FILE_SIZE=None,
         DEPOSIT_RECORDS_API=DEPOSIT_RECORDS_API,
-        RECORDS_REST_SORT_OPTIONS=RECORDS_REST_SORT_OPTIONS,
+        RECORDS_REST_SORT_OPTIONS=copy.deepcopy(RECORDS_REST_SORT_OPTIONS),
         PIDRELATIONS_RELATION_TYPES=PIDRELATIONS_RELATION_TYPES,
         WEKO_USERPROFILES_ROLES=WEKO_USERPROFILES_ROLES,
         EMAIL_DISPLAY_FLG = True,
@@ -226,13 +270,18 @@ def base_app(instance_path):
         WEKO_INDEX_TREE_DEFAULT_DISPLAY_NUMBER=WEKO_INDEX_TREE_DEFAULT_DISPLAY_NUMBER,
         DEPOSIT_DEFAULT_JSONSCHEMA=DEPOSIT_DEFAULT_JSONSCHEMA,
         DEPOSIT_JSONSCHEMAS_PREFIX=DEPOSIT_JSONSCHEMAS_PREFIX,
-        WEKO_SEARCH_REST_ENDPOINTS=WEKO_SEARCH_REST_ENDPOINTS,
+        WEKO_SEARCH_REST_ENDPOINTS=copy.deepcopy(WEKO_SEARCH_REST_ENDPOINTS),
         INDEXER_MQ_QUEUE = Queue("indexer", exchange=Exchange("indexer", type="direct"), routing_key="indexer",queue_arguments={"x-queue-type":"quorum"}),
         I18N_LANGUAGES=[("ja", "Japanese"), ("en", "English")],
         WEKO_ITEMTYPE_EXCLUDED_KEYS=_WEKO_ITEMTYPE_EXCLUDED_KEYS
     )
 
-    app_.config['WEKO_SEARCH_REST_ENDPOINTS']['recid']['search_index']='test-weko'
+    prefix = app_.config['SEARCH_INDEX_PREFIX']
+    app_.config['INDEXER_DEFAULT_INDEX'] = prefix + 'weko-item-v1.0.0'
+    app_.config['SEARCH_UI_SEARCH_INDEX'] = prefix + 'weko'
+    app_.config['WEKO_SEARCH_REST_ENDPOINTS']['recid']['search_index'] = prefix + 'weko'
+    app_.config['RECORDS_REST_SORT_OPTIONS'][prefix + 'weko'] = copy.deepcopy(
+        RECORDS_REST_SORT_OPTIONS[SEARCH_UI_SEARCH_INDEX])
     # tmp = app_.config['RECORDS_REST_SORT_OPTIONS']['tenant1-weko']
     # app_.config['RECORDS_REST_SORT_OPTIONS']['test-weko']=tmp
     # Babel(app_)
@@ -303,7 +352,11 @@ def base_app(instance_path):
 def app(base_app):
     """Flask application fixture."""
     with base_app.app_context():
-        yield base_app
+        try:
+            yield base_app
+        finally:
+            db_.session.remove()
+            db_.engine.dispose()
 
 
 
@@ -366,12 +419,13 @@ def admin_view(app, user_activity_log_partition_table):
 @pytest.fixture()
 def db(app):
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.drop_all()
+        db_.engine.dispose()
 
 
 @pytest.fixture()
