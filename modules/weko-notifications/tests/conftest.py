@@ -15,6 +15,7 @@ import os
 import pytest
 import shutil
 import tempfile
+import uuid
 
 from flask import Flask
 from flask_babel import Babel
@@ -39,7 +40,12 @@ from invenio_records import InvenioRecords
 from invenio_records_ui import InvenioRecordsUI
 from invenio_records_ui.views import create_blueprint_from_app
 from invenio_search import InvenioSearch
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 
 from weko_index_tree import WekoIndexTree
 from weko_index_tree.models import Index
@@ -67,12 +73,41 @@ from .helpers import json_data
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 
 @pytest.fixture
-def base_app(instance_path):
+def versioning_listeners():
+    """Release only the versioning listeners installed by this application."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
+@pytest.fixture
+def base_app(instance_path, versioning_listeners):
     """Flask application fixture."""
     app_ = Flask(
         "testapp",
@@ -84,42 +119,48 @@ def base_app(instance_path):
         SECRET_KEY="testing_key",
         SERVER_NAME="TEST_SERVER.localdomain",
         THEME_SITEURL="http://test_server.localdomain",
-        SQLALCHEMY_DATABASE_URI=os.getenv(
-            "SQLALCHEMY_DATABASE_URI",
-            "postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest"),
+        SQLALCHEMY_DATABASE_URI=make_url(os.environ["SQLALCHEMY_DATABASE_URI"]).set(
+            database="notifications_ut_" + uuid.uuid4().hex),
         WEKO_NOTIFICATIONS=True,
     )
-    Babel(app_)
-    Mail(app_)
-    Menu(app_)
-    InvenioAccess(app_)
-    InvenioAccounts(app_)
-    InvenioAdmin(app_)
-    InvenioAssets(app_)
-    InvenioDB(app_)
-    InvenioI18N(app_)
-    InvenioOAuth2Server(app_)
-    InvenioPIDRelations(app_)
-    InvenioPIDStore(app_)
-    InvenioRecords(app_)
-    InvenioRecordsUI(app_)
-    InvenioSearch(app_)
-    WekoDeposit(app_)
-    WekoIndexer(app_)
-    WekoIndexTree(app_)
-    WekoItemsUI(app_)
-    WekoRecords(app_)
-    WekoRecordsUI(app_)
-    WekoSchemaUI(app_)
-    WekoTheme(app_)
-    WekoUserProfiles(app_)
-    WekoWorkflow(app_)
+    try:
+        Babel(app_)
+        Mail(app_)
+        Menu(app_)
+        InvenioAccess(app_)
+        InvenioAccounts(app_)
+        InvenioAdmin(app_)
+        InvenioAssets(app_)
+        InvenioDB(app_)
+        InvenioI18N(app_)
+        InvenioOAuth2Server(app_)
+        InvenioPIDRelations(app_)
+        InvenioPIDStore(app_)
+        InvenioRecords(app_)
+        InvenioRecordsUI(app_)
+        InvenioSearch(app_)
+        WekoDeposit(app_)
+        WekoIndexer(app_)
+        WekoIndexTree(app_)
+        WekoItemsUI(app_)
+        WekoRecords(app_)
+        WekoRecordsUI(app_)
+        WekoSchemaUI(app_)
+        WekoTheme(app_)
+        WekoUserProfiles(app_)
+        WekoWorkflow(app_)
 
-    current_assets = LocalProxy(lambda: app_.extensions["invenio-assets"])
-    current_assets.collect.collect()
-    app_.register_blueprint(create_blueprint_from_app(app_))
+        current_assets = LocalProxy(lambda: app_.extensions["invenio-assets"])
+        current_assets.collect.collect()
+        app_.register_blueprint(create_blueprint_from_app(app_))
 
-    yield app_
+        yield app_
+    finally:
+        if "sqlalchemy" in app_.extensions:
+            with app_.app_context():
+                db_.session.remove()
+                db_.engine.dispose()
+
 
 @pytest.fixture
 def app(base_app):
@@ -137,12 +178,18 @@ def client(app):
 @pytest.fixture
 def db(app):
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    database_url = db_.engine.url
+    if database_exists(database_url):
+        raise RuntimeError("Refusing to reuse an existing test database")
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
+
 
 @pytest.fixture
 def users(app, db):
