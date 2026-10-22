@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """Pytest for weko-logging configuration."""
 
+import json
 import logging
 import shutil
 import tempfile
+from uuid import uuid4
 
 import pytest
 import os
@@ -13,6 +15,7 @@ import pytest
 
 from datetime import datetime, timedelta
 from flask import Flask
+from flask.logging import default_handler
 from flask_babel import Babel
 from flask_menu import Menu
 
@@ -30,7 +33,12 @@ from invenio_db import db as db_
 from invenio_files_rest.ext import InvenioFilesREST
 from invenio_files_rest.models import Location
 from invenio_i18n import InvenioI18N
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy.engine.url import make_url
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 
 from weko_admin import WekoAdmin
 from weko_redis.redis import RedisConnection
@@ -38,26 +46,106 @@ from weko_theme import WekoTheme
 from weko_index_tree.models import Index
 
 from weko_logging.audit import WekoLoggingUserActivity
+from weko_logging.utils import UserActivityLogUtils
 from weko_logging.views import blueprint as logging_blueprint
+
+@pytest.fixture(autouse=True)
+def logging_state():
+    """Restore the loggers changed by the existing logging tests."""
+    loggers = [logging.getLogger(name) for name in (
+        'user-activity', 'py.warnings', 'test_weko_logging_app',
+        'testapp', 'tests.test_console')]
+    states = {logger: (list(logger.handlers), list(logger.filters), logger.level,
+                       logger.propagate, logger.disabled) for logger in loggers}
+    handlers = {default_handler}
+    handlers.update(handler for logger in loggers for handler in logger.handlers)
+    handler_states = {handler: (handler.level, handler.formatter, list(handler.filters))
+                      for handler in handlers}
+    try:
+        yield
+    finally:
+        for logger, state in states.items():
+            for handler in logger.handlers:
+                if handler not in handlers:
+                    handler.close()
+            logger.handlers, logger.filters, level, logger.propagate, logger.disabled = state
+            logger.setLevel(level)
+        for handler, (level, formatter, filters) in handler_states.items():
+            handler.setLevel(level)
+            handler.setFormatter(formatter)
+            handler.filters = filters
+
+
+@pytest.fixture()
+def versioning_listeners():
+    """Release only global registrations introduced by this app."""
+    manager = versioning_manager
+    registrations = [(target, name, listener) for target, listeners in (
+        (Session, manager.session_listeners),
+        (Mapper, manager.mapper_listeners),
+        (Mapper, manager.class_config_listeners))
+        for name, listener in listeners.items()]
+    registrations.extend([
+        (Engine, 'before_execute', manager.track_association_operations),
+        (Engine, 'rollback', manager.clear_connection),
+        (Engine, 'set_connection_execution_options', manager.track_cloned_connections),
+    ])
+    existing = [event.contains(*registration) for registration in registrations]
+    try:
+        yield
+    finally:
+        for registration, present in zip(registrations, existing):
+            if not present and event.contains(*registration):
+                event.remove(*registration)
+
 
 @pytest.fixture()
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 @pytest.fixture()
-def base_app(instance_path):
+def database_uri():
+    """Own a unique database without touching the configured database."""
+    url = make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+        database='logging_ut_' + uuid4().hex)
+    uri = url.render_as_string(hide_password=False)
+    try:
+        yield uri
+    finally:
+        if database_exists(uri):
+            drop_database(uri)
+
+
+@pytest.fixture()
+def activity_cache_keys(monkeypatch):
+    """Namespace the two activity-export keys for all real consumers."""
+    prefix = 'logging_ut_' + uuid4().hex + '_'
+    keys = []
+    for name in ('USER_ACTIVITY_LOG_EXPORT_CACHE_STATUS_KEY',
+                 'USER_ACTIVITY_LOG_EXPORT_CACHE_URL_KEY'):
+        key = prefix + getattr(UserActivityLogUtils, name)
+        monkeypatch.setattr(UserActivityLogUtils, name, key)
+        keys.append(key)
+    return keys
+
+
+@pytest.fixture()
+def base_app(instance_path, database_uri, activity_cache_keys, versioning_listeners):
     """Flask application fixture."""
-    app_ = Flask('test_weko_logging_app', instance_path=instance_path)
+    app_ = Flask('test_weko_logging_app', instance_path=instance_path,
+                 static_folder=os.path.join(instance_path, 'static'))
     app_.config.update(
         SERVER_NAME='test_server',
         ACCOUNTS_USE_CELERY=False,
         SECRET_KEY='SECRET_KEY',
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #     'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI','postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=database_uri,
 
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
         SQLALCHEMY_ECHO=False,
@@ -76,6 +164,7 @@ def base_app(instance_path):
         CACHE_REDIS_HOST="redis",
         REDIS_PORT='6379',
         ACCOUNTS_SESSION_REDIS_DB_NO = 1,
+        CELERY_RESULT_BACKEND_DB_NO=2,
         CACHE_TYPE="redis",
         WEKO_LOGGING_USER_ACTIVITY_DB_SETTING = {
             "log_level": "INFO",
@@ -90,20 +179,33 @@ def base_app(instance_path):
     )
     app_.testing = True
     app_.login_manager = dict(_login_disabled=True)
-    Babel(app_)
-    Menu(app_)
-    InvenioAccess(app_)
-    InvenioAccounts(app_)
-    InvenioAdmin(app_)
-    InvenioAssets(app_)
-    InvenioCache(app_)
-    InvenioDB(app_)
-    InvenioFilesREST(app_)
-    InvenioI18N(app_)
-    WekoAdmin(app_)
-    WekoTheme(app_)
-    WekoLoggingUserActivity(app_)
-    yield app_
+    try:
+        Babel(app_)
+        Menu(app_)
+        InvenioAccess(app_)
+        InvenioAccounts(app_)
+        InvenioAdmin(app_)
+        InvenioAssets(app_)
+        InvenioCache(app_)
+        InvenioDB(app_)
+        InvenioFilesREST(app_)
+        InvenioI18N(app_)
+        WekoAdmin(app_)
+        WekoTheme(app_)
+        WekoLoggingUserActivity(app_)
+        yield app_
+    finally:
+        with app_.app_context():
+            try:
+                redis = RedisConnection().connection(db=app_.config['CACHE_REDIS_DB'])
+                try:
+                    redis.delete(*activity_cache_keys)
+                finally:
+                    redis.connection_pool.disconnect()
+            finally:
+                if 'sqlalchemy' in app_.extensions:
+                    db_.session.remove()
+                    db_.engine.dispose()
 
 
 
@@ -120,10 +222,12 @@ def db(app):
     #     create_database(db_.engine.url)
     if not database_exists(str(db_.engine.url)):
         create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.drop_all()
 
 
 @pytest.fixture()
@@ -263,32 +367,70 @@ def users(app, db):
 def tmppath():
     """Make a temporary directory."""
     tmpdir = tempfile.mkdtemp()
-    yield tmpdir
-    shutil.rmtree(tmpdir)
+    try:
+        yield tmpdir
+    finally:
+        shutil.rmtree(tmpdir)
 
 
 @pytest.fixture(scope="function", autouse=True)
 def pywarnlogger():
     """Rest the py.warnings logger."""
     logger = logging.getLogger("py.warnings")
-    yield logger
+    handlers = list(logger.handlers)
     logger.handlers = []
+    try:
+        yield logger
+    finally:
+        for handler in logger.handlers:
+            if handler not in handlers:
+                handler.close()
+        logger.handlers = handlers
 
 @pytest.fixture
 def redis_connect(app):
     redis_connection = RedisConnection().connection(db=app.config['CACHE_REDIS_DB'], kv = True)
-    return redis_connection
+    try:
+        yield redis_connection
+    finally:
+        redis_connection.redis.connection_pool.disconnect()
+
+@pytest.fixture()
+def celery_result_meta(app):
+    """Own real Celery metadata keys used by the export-view test."""
+    connection = RedisConnection().connection(
+        db=app.config['CELERY_RESULT_BACKEND_DB_NO'])
+    keys = set()
+
+    def store(task_id, state):
+        key = 'celery-task-meta-' + task_id
+        if key not in keys:
+            assert not connection.exists(key)
+            keys.add(key)
+        connection.set(key, json.dumps({
+            'task_id': task_id, 'status': state, 'result': 'result',
+            'traceback': None, 'children': [],
+        }))
+
+    try:
+        yield store
+    finally:
+        try:
+            if keys:
+                connection.delete(*keys)
+        finally:
+            connection.connection_pool.disconnect()
+
 
 @pytest.fixture()
 def location(app, db):
     """Create default location."""
-    tmppath = tempfile.mkdtemp()
-    with db.session.begin_nested():
-        Location.query.delete()
-        loc = Location(name='local', uri=tmppath, default=True)
-        db.session.add(loc)
-    db.session.commit()
-    return location
+    with tempfile.TemporaryDirectory() as tmppath:
+        with db.session.begin_nested():
+            loc = Location(name='local', uri=tmppath, default=True)
+            db.session.add(loc)
+        db.session.commit()
+        yield loc
 
 
 @pytest.fixture()
