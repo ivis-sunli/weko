@@ -16,17 +16,22 @@ import os
 import pytest
 import shutil
 import tempfile
+import uuid
 from unittest.mock import patch
 
 from flask import Flask
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 
 from invenio_access import InvenioAccess
 from invenio_access.models import ActionRoles, ActionUsers
 from invenio_accounts import InvenioAccounts
 from invenio_accounts.models import Role, User
 from invenio_db import InvenioDB, db as db_
-from invenio_db.utils import drop_alembic_version_table
 from invenio_i18n import InvenioI18N
 from invenio_files_rest import InvenioFilesREST
 from invenio_files_rest.models import Location
@@ -48,27 +53,54 @@ from .helpers import create_record, json_data
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 
 @pytest.fixture
-def base_app(instance_path):
+def versioning_listeners():
+    """Release only the versioning listeners installed by this application."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
+@pytest.fixture
+def base_app(instance_path, versioning_listeners, monkeypatch):
     app_ = Flask(
         'testapp',
         instance_path=instance_path,
         static_folder=os.path.join(instance_path, "static"),
     )
-    os.environ["INVENIO_WEB_HOST_NAME"] = "127.0.0.1"
+    monkeypatch.setenv("INVENIO_WEB_HOST_NAME", "127.0.0.1")
     app_.config.update(
         THEME_SITEURL="https://localhost",
         SECRET_KEY="SECRET_KEY",
         SECURITY_PASSWORD_SALT='CHANGE_ME_ALSO',
         SERVER_NAME="TEST_SERVER",
-        # SQLALCHEMY_DATABASE_URI=os.environ.get(
-        #     'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'
-        # ),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI','postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+            database='signposting_ut_' + uuid.uuid4().hex),
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
         SEARCH_UI_SEARCH_INDEX="test-weko",
         INDEXER_FILE_DOC_TYPE="content",
@@ -92,21 +124,27 @@ def base_app(instance_path):
             ),
         ),
     )
-    InvenioAccess(app_)
-    InvenioAccounts(app_)
-    InvenioDB(app_)
-    InvenioI18N(app_)
-    InvenioFilesREST(app_)
-    InvenioRecords(app_)
-    InvenioRecordsUI(app_)
-    InvenioPIDStore(app_)
-    WekoIndexTree(app_)
-    WekoWorkflow(app_)
-    WekoLoggingUserActivity(app_)
+    try:
+        InvenioAccess(app_)
+        InvenioAccounts(app_)
+        InvenioDB(app_)
+        InvenioI18N(app_)
+        InvenioFilesREST(app_)
+        InvenioRecords(app_)
+        InvenioRecordsUI(app_)
+        InvenioPIDStore(app_)
+        WekoIndexTree(app_)
+        WekoWorkflow(app_)
+        WekoLoggingUserActivity(app_)
 
-    app_.register_blueprint(create_blueprint_from_app(app_))
+        app_.register_blueprint(create_blueprint_from_app(app_))
 
-    return app_
+        yield app_
+    finally:
+        if 'sqlalchemy' in app_.extensions:
+            with app_.app_context():
+                db_.session.remove()
+                db_.engine.dispose()
 
 
 @pytest.fixture
@@ -120,13 +158,17 @@ def app(base_app):
 @pytest.fixture
 def db(app):
     """Get setup database."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
-    drop_alembic_version_table()
+    database_url = db_.engine.url
+    if database_exists(database_url):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
 
 
 @pytest.fixture
