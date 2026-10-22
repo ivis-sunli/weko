@@ -24,10 +24,17 @@
 import os
 import shutil
 import tempfile
+import uuid
+from sqlalchemy.engine.url import make_url
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
 import pytest
 from mock import MagicMock, patch
 from flask import Flask, json, jsonify, session, url_for
 from flask_babel import Babel
+from jinja2 import ChoiceLoader, DictLoader
 from flask_breadcrumbs import Breadcrumbs
 from flask_menu import Menu
 from sqlalchemy_utils.functions import create_database, database_exists, \
@@ -48,31 +55,56 @@ from weko_groups import WekoGroups
 from weko_groups.api import Group
 from weko_groups import webpack
 
+@pytest.fixture()
+def versioning_listeners():
+    """Release only the versioning listeners installed by this application."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
 @pytest.fixture
-def app(request):
+def app(instance_path, versioning_listeners):
     """
     Flask application fixture.
 
-    :param request: Request.
+    :param instance_path: Temporary instance path.
+    :param versioning_listeners: Owned listener cleanup.
     :return: App object.
     """
-    instance_path = tempfile.mkdtemp()
     app = Flask('weko_groups_app', instance_path=instance_path)
     app.config.update(
         LOGIN_DISABLED=False,
         MAIL_SUPPRESS_SEND=True,
         SECRET_KEY='1qertgyujk345678ijk',
-        # SQLALCHEMY_DATABASE_URI=os.environ.get('SQLALCHEMY_DATABASE_URI',
-        #                                        'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                           'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+            database='groups_ut_' + uuid.uuid4().hex),
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
         TESTING=True,
         WTF_CSRF_ENABLED=False,
     )
     Babel(app)
     Menu(app)
-    InvenioAdmin(app)
+    InvenioAdmin(app, entry_point_group=None)
     Breadcrumbs(app)
     InvenioDB(app)
     InvenioAccounts(app)
@@ -80,19 +112,17 @@ def app(request):
     InvenioI18N(app)
 
     with app.app_context():
-        if str(db.engine.url) != 'sqlite://' and \
-           not database_exists(str(db.engine.url)):
-            create_database(str(db.engine.url))
-        db.create_all()
-
-    def teardown():
-        with app.app_context():
-            if str(db.engine.url) != 'sqlite://':
-                drop_database(str(db.engine.url))
-        shutil.rmtree(instance_path)
-
-    request.addfinalizer(teardown)
-    return app
+        database_url = db.engine.url
+        if database_exists(database_url):
+            raise RuntimeError('Refusing to reuse an existing test database')
+        create_database(database_url)
+        try:
+            db.create_all()
+            yield app
+        finally:
+            db.session.remove()
+            db.engine.dispose()
+            drop_database(database_url)
 
 
 @pytest.fixture
@@ -131,20 +161,22 @@ def example_group(app):
 @pytest.yield_fixture()
 def instance_path():
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 
 @pytest.fixture()
-def base_app(instance_path):
+def base_app(instance_path, versioning_listeners):
     app_ = Flask("testapp", instance_path=instance_path)
     app_.config.update(
-        # SQLALCHEMY_DATABASE_URI=os.environ.get(
-        #     'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                           'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+            database='groups_ut_' + uuid.uuid4().hex),
         TESTING=True,
         SERVER_NAME="TEST_SERVER",
+        WTF_CSRF_ENABLED=False,
+        GROUPS_BASE_TEMPLATE='test-groups-base.html',
         SEARCH_INDEX_PREFIX='test-',
         INDEXER_DEFAULT_DOC_TYPE='testrecord',
         SEARCH_UI_SEARCH_INDEX='tenant1-weko',
@@ -168,8 +200,17 @@ def base_app(instance_path):
     InvenioAccounts(app_)
     WekoGroups(app_)
     InvenioAccess(app_)
-    InvenioAdmin(app_)
+    InvenioAdmin(app_, entry_point_group=None)
     InvenioI18N(app_)
+    # Render the real group templates inside an isolated settings shell.
+    app_.jinja_loader = ChoiceLoader([
+        DictLoader({'test-groups-base.html': (
+            '{% block css %}{% endblock %}'
+            '{% block settings_form %}{% endblock %}'
+        )}),
+        app_.jinja_loader,
+    ])
+    app_.jinja_env.globals['webpack'] = {}
     # Babel(app_)
     # InvenioDB(app_)
     # InvenioAccounts(app_)
@@ -180,7 +221,12 @@ def base_app(instance_path):
     # app_.register_blueprint(blueprint_api)
 
 
-    return app_
+    try:
+        yield app_
+    finally:
+        with app_.app_context():
+            db.session.remove()
+            db.engine.dispose()
 
 
 @pytest.yield_fixture()
@@ -193,12 +239,17 @@ def app_2(base_app):
 def db_2(app_2):
     from invenio_db import db as db_
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    database_url = db_.engine.url
+    if database_exists(database_url):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
 
 
 @pytest.yield_fixture()
@@ -221,9 +272,9 @@ def client_request_args(app_2):
 
 
 @pytest.fixture()
-def users(app, db_2):
+def users(app_2, db_2):
     """Create users."""
-    ds = app.extensions['invenio-accounts'].datastore
+    ds = app_2.extensions['invenio-accounts'].datastore
     user_count = User.query.filter_by(email='user@test.org').count()
     if user_count != 1:
         user = create_test_user(email='user@test.org')
