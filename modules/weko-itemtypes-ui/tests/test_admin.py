@@ -373,7 +373,7 @@ class TestItemTypeMetaDataView:
 
 #     def get_property_list(self, property_id=0):
 # .tox/c1/bin/pytest --cov=weko_itemtypes_ui tests/test_admin.py::TestItemTypeMetaDataView::test_get_property_list -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-itemtypes-ui/.tox/c1/tmp
-    def test_get_property_list(self,client,admin_view,db,itemtype_props,admin_settings,users):
+    def test_get_property_list(self,client,admin_view,db,itemtype_props,admin_settings,users,mocker):
         login_user_via_session(client=client,email=users[0]["email"])
         url = url_for("itemtypesregister.get_property_list")
         billing_permission = BillingPermission(user_id=1,is_active=True)
@@ -408,8 +408,9 @@ class TestItemTypeMetaDataView:
         }
         assert result == test
         # adminsetting is None
-        patch("weko_itemtypes_ui.admin.AdminSettings.get",return_value=None)
+        mock_settings = mocker.patch("weko_itemtypes_ui.admin.AdminSettings.get",return_value=None)
         res = client.get(url,query_string={"lang":"en"})
+        mock_settings.assert_any_call('default_properties_settings')
         result = json.loads(res.data)
         test = {
             "system":{"2":{"name":"S_test2","schema":{},"form":{},"forms":{},"sort":None,"is_file":False}},
