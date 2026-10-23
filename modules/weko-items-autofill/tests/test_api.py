@@ -65,7 +65,8 @@ class TestCrossRefOpenURL:
 # .tox/c1/bin/pytest --cov=weko_items_autofill tests/test_api.py::TestCrossRefOpenURL::test_do_http_request -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-items-autofill/.tox/c1/tmp
     def test_do_http_request(self,mocker):
         mock_get = mocker.patch("weko_items_autofill.api.requests.get")
-        cross_ref = CrossRefOpenURL("test_pid","test_doi")
+        cross_ref = CrossRefOpenURL(
+            "test_pid", "test_doi", http_proxy="test_http_proxy", https_proxy="test_https_proxy")
         cross_ref._do_http_request()
         mock_get.assert_called_with("https://doi.crossref.org/openurl?pid=test_pid&id=doi:test_doi&format=xml",
                                     timeout=5,proxies={"http":"test_http_proxy","https":"test_https_proxy"})
@@ -149,7 +150,7 @@ class TestCiNiiURL:
 # .tox/c1/bin/pytest --cov=weko_items_autofill tests/test_api.py::TestCiNiiURL::test_do_http_request -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-items-autofill/.tox/c1/tmp
     def test_do_http_request(self,mocker):
         mock_get = mocker.patch("weko_items_autofill.api.requests.get")
-        cini = CiNiiURL("test_naid")
+        cini = CiNiiURL("test_naid", http_proxy="test_http_proxy", https_proxy="test_https_proxy")
         cini._do_http_request()
         mock_get.assert_called_with("https://cir.nii.ac.jp/crid/test_naid.json",
                                     timeout=5,proxies={"http":"test_http_proxy","https":"test_https_proxy"})
