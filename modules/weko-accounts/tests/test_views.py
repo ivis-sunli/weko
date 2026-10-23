@@ -1,4 +1,6 @@
 from unittest.mock import MagicMock
+from copy import deepcopy
+from urllib.parse import urljoin
 import pytest
 import json
 import redis
@@ -71,11 +73,16 @@ def test_adjust_shib_admin_DB(app, db, mocker):
 
     # TESTING=False, AdminSettings exist
     app.config.update(WEKO_ACCOUNTS_SHIB_LOGIN_ENABLED=True)
+    persisted_settings = deepcopy({setting.name: setting.settings
+                                   for setting in AdminSettings.query.all()})
     with patch("weko_accounts.views.db.session.add") as db_add, \
             patch("weko_accounts.views.db.session.commit") as db_commit:
         _adjust_shib_admin_DB()
         assert db_add.call_count == 0
-        assert db_commit.call_count == 3
+        assert db_commit.call_count == 0
+    db.session.expire_all()
+    assert {setting.name: setting.settings
+            for setting in AdminSettings.query.all()} == persisted_settings
 
 
 #def _redirect_method(has_next=False):
@@ -737,7 +744,7 @@ def test_shib_login(client,redis_connect,users,mocker):
     mock_flash = mocker.patch("weko_accounts.views.flash")
     client.get(url)
     mock_flash.assert_called_with("Missing SHIB_ATTR!",category="error")
-    assert redis_connect.redis.exists("Shib-Session-1111") is False
+    assert redis_connect.redis.exists("Shib-Session-1111") == 0
 
     # not cache_val(AMS)
     redis_connect.put("Shib-Session-1111",bytes('',"utf-8"))
@@ -1206,7 +1213,7 @@ def test_shib_sp_login(client, redis_connect,mocker, db, users):
     )
     res = client.post(url, data=form, headers=headers)
     assert res.status_code == 302
-    assert res.headers['Location'] == url_for("security.login", _external=True)
+    assert urljoin(res.request.url, res.headers['Location']) == url_for("security.login", _external=True)
 
 
 #def shib_stub_login():

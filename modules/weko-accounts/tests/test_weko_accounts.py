@@ -50,6 +50,7 @@ def test_init():
 # .tox/c1/bin/pytest --cov=weko_accounts tests/test_weko_accounts.py::test_init_login -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-accounts/.tox/c1/tmp
 def test_init_login(db, users):
     app = Flask('testapp')
+    app.config['SECRET_KEY'] = 'testing_key'
     InvenioI18N(app)
     user_datastore = SQLAlchemyUserDatastore(db, User, Role)
     security = Security(app, user_datastore)
@@ -66,7 +67,6 @@ def test_view(app,session_time):
 
     :param app: The flask application.
     """
-    WekoAccounts(app)
     with app.test_client() as client:
         from flask import url_for
         url = url_for("weko_accounts.index")
