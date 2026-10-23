@@ -23,6 +23,14 @@
 import os, sys
 import shutil
 import tempfile
+import uuid
+
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
+from invenio_base.signals import app_loaded
 from datetime import datetime, timedelta
 
 import pytest
@@ -30,7 +38,7 @@ from flask import Flask
 from flask_babel import Babel
 from flask_menu import Menu
 from flask_mail import Mail
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 
 
 from invenio_access import InvenioAccess
@@ -54,34 +62,80 @@ from weko_logging.audit import WekoLoggingUserActivity
 
 from weko_accounts import WekoAccounts, WekoAccountsREST
 from weko_accounts.views import blueprint
-os.environ['TIKA_LOG_PATH'] = '/code/modules/weko-admin/tika.log'
+
+
 @pytest.yield_fixture()
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
+
+
+@pytest.fixture(autouse=True)
+def versioning_listeners():
+    """Release only the versioning listeners installed by this application."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+
+    def cleanup():
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+    try:
+        yield cleanup
+    finally:
+        cleanup()
+
+
+@pytest.fixture(autouse=True)
+def app_loaded_receivers():
+    """Release only pending extension callbacks registered by this test."""
+    existing = set(app_loaded.receivers_for(None))
+    try:
+        yield
+    finally:
+        for receiver in set(app_loaded.receivers_for(None)) - existing:
+            app_loaded.disconnect(receiver)
 
 
 @pytest.fixture()
-def base_app(instance_path):
+def base_app(instance_path, versioning_listeners):
     """Flask application fixture."""
-    app_ = Flask('testapp', instance_path=instance_path)
+    app_ = Flask('testapp', instance_path=instance_path,
+                 static_folder=os.path.join(instance_path, 'static'))
     app_.config.update(
         SECRET_KEY='SECRET_KEY',
         TESTING=True,
         SERVER_NAME='test_server.localdomain',
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #  'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+            database='accounts_ut_' + uuid.uuid4().hex),
         THEME_SITEURL = 'https://localhost',
         CACHE_REDIS_URL=os.environ.get(
-            "CACHE_REDIS_URL", "redis://redis:6379/0"
+            "CACHE_REDIS_URL", "redis://{}:6379/0".format(os.environ["CACHE_REDIS_HOST"])
         ),
         CACHE_REDIS_DB='0',
         GROUP_INFO_REDIS_DB='4',
-        CACHE_REDIS_HOST="redis",
+        CACHE_REDIS_HOST=os.environ['CACHE_REDIS_HOST'],
         CACHE_TYPE="redis",
         REDIS_PORT='6379',
         WEB_HOST_NAME='localhost',
@@ -97,25 +151,30 @@ def base_app(instance_path):
             '機関内のOrthros': 'Repository Administrator'
         }
     )
-    Babel(app_)
-    InvenioI18N(app_)
-    InvenioDB(app_)
-    Mail(app_)
-    Menu(app_)
-    InvenioDB(app_)
-    InvenioAccounts(app_)
-    InvenioAccess(app_)
-    InvenioAdmin(app_)
-    InvenioOAuth2Server(app_)
-    WekoAccounts(app_)
-    WekoRecordsUI(app_)
-    WekoAdmin(app_)
-    WekoUserProfiles(app_)
-    app_.register_blueprint(blueprint, name='weko_accounts_unique')
-    WekoAccountsREST(app_)
-    WekoSearchUI(app_)
-    WekoLoggingUserActivity(app_)
-    return app_
+    try:
+        Babel(app_)
+        InvenioI18N(app_)
+        InvenioDB(app_)
+        Mail(app_)
+        Menu(app_)
+        InvenioAccounts(app_)
+        InvenioAccess(app_)
+        InvenioAdmin(app_)
+        InvenioOAuth2Server(app_)
+        WekoAccounts(app_)
+        WekoRecordsUI(app_)
+        WekoAdmin(app_)
+        WekoUserProfiles(app_)
+        app_.register_blueprint(blueprint, name='weko_accounts_unique')
+        WekoAccountsREST(app_)
+        WekoSearchUI(app_)
+        WekoLoggingUserActivity(app_)
+        yield app_
+    finally:
+        if 'sqlalchemy' in app_.extensions:
+            with app_.app_context():
+                db_.session.remove()
+                db_.engine.dispose()
 
 
 @pytest.yield_fixture()
@@ -131,13 +190,17 @@ def request_context(app):
 @pytest.yield_fixture()
 def db(app):
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
-    # drop_database(str(db_.engine.url))
+    database_url = db_.engine.url
+    if database_exists(database_url):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
 
 @pytest.yield_fixture()
 def client(app,session_time):
@@ -294,13 +357,27 @@ def session_time(app,db):
 @pytest.fixture
 def redis_connect(app):
     redis_connection = RedisConnection().connection(db=app.config['CACHE_REDIS_DB'], kv = True)
-    return redis_connection
+    keys = ('Shib-Session-1111', 'Shib-Session-session', 'Shib-Session-')
+    if any(redis_connection.redis.exists(key) for key in keys):
+        raise RuntimeError('Refusing to reuse an existing Shibboleth test key')
+    try:
+        yield redis_connection
+    finally:
+        redis_connection.redis.delete(*keys)
+        redis_connection.redis.close()
 
 @pytest.fixture()
 def group_info_redis_connect(app):
     """Redis connection for group info."""
     redis_connection = RedisConnection().connection(db=app.config['GROUP_INFO_REDIS_DB'], kv=True)
-    return redis_connection
+    key = 'example_com_gakunin_groups'
+    if redis_connection.redis.exists(key):
+        raise RuntimeError('Refusing to reuse an existing GakuNin test key')
+    try:
+        yield redis_connection
+    finally:
+        redis_connection.redis.delete(key)
+        redis_connection.redis.close()
 
 @pytest.fixture()
 def users_login(users):
