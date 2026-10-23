@@ -15,6 +15,7 @@ import json
 import pytest
 import copy
 import uuid
+from redis import StrictRedis
 
 from os.path import join
 from flask import Flask
@@ -27,6 +28,7 @@ from invenio_access.models import ActionRoles, ActionUsers
 from invenio_accounts import InvenioAccounts
 from invenio_accounts.models import Role, User
 from invenio_accounts.testutils import create_test_user
+from invenio_admin import InvenioAdmin
 from invenio_assets import InvenioAssets
 from invenio_cache import InvenioCache
 from invenio_communities import InvenioCommunities
@@ -47,21 +49,57 @@ from invenio_pidrelations.models import PIDRelation
 from invenio_records import InvenioRecords
 from invenio_search import InvenioSearch
 from mock import patch
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 
 from weko_index_tree.models import Index
 from weko_records.api import ItemsMetadata
 
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def instance_path():
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
+
+@pytest.fixture
+def versioning_listeners():
+    """Release only the versioning listeners installed by this application."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
 
 @pytest.fixture()
-def base_app(instance_path, request):
+def base_app(instance_path, request, monkeypatch, versioning_listeners):
     """Flask application fixture."""
+    namespace = 'communities_ut_' + uuid.uuid4().hex
+    monkeypatch.setenv('INVENIO_WEB_HOST_NAME', namespace)
     app_ = Flask('testapp', instance_path=instance_path,static_folder=join(instance_path, "static"),)
     app_.config.update(
         TESTING=True,
@@ -75,8 +113,8 @@ def base_app(instance_path, request):
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #     'SQLALCHEMY_DATABASE_URI',
         #     'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                          'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+            database='communities_ut_' + uuid.uuid4().hex),
         SEARCH_OPENSEARCH_HOSTS=os.environ.get(
             'SEARCH_OPENSEARCH_HOSTS', None),
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
@@ -86,14 +124,15 @@ def base_app(instance_path, request):
         SERVER_NAME='test_server',
         THEME_SITEURL='https://inveniosoftware.org',
         MAIL_SUPPRESS_SEND=True,
-        SEARCH_INDEX_PREFIX="test-",
+        SEARCH_INDEX_PREFIX="communities-ut-" + uuid.uuid4().hex + "-",
         INDEXER_DEFAULT_INDEX="{}-weko-item-v1.0.0".format("test"),
         SEARCH_UI_SEARCH_INDEX="{}-weko".format("test"),
         COMMUNITIES_INDEX_LIST_FULL_ACCESS_ROLES = [
             "System Administrator",
             "Repository Administrator",
         ],
-        CACHE_REDIS_DB='0',
+        CACHE_REDIS_DB='11',
+        CACHE_KEY_PREFIX=namespace + ':',
         CACHE_REDIS_HOST="redis",
         REDIS_PORT='6379',
         WEKO_ACCOUNTS_GAKUNIN_GROUP_PATTERN_DICT= {
@@ -108,45 +147,72 @@ def base_app(instance_path, request):
         },
         WEKO_INDEX_TREE_UPDATED = True
     )
-    FlaskCeleryExt(app_)
-    Menu(app_)
-    Babel(app_)
-    InvenioI18N(app_)
-    InvenioDB(app_)
-    InvenioDeposit(app_)
-    InvenioAccounts(app_)
-    InvenioAssets(app_)
-    InvenioAccess(app_)
-    #InvenioAdmin(app_)
-    InvenioCache(app_)
-    InvenioSearch(app_)
-    InvenioRecords(app_)
-    InvenioIndexer(app_)
-    InvenioOAIServer(app_)
-    InvenioFilesREST(app_)
-    InvenioCommunities(app_)
-    InvenioMail(app_)
+    app_.config['INDEXER_DEFAULT_INDEX'] = app_.config['SEARCH_INDEX_PREFIX'] + 'weko-item-v1.0.0'
+    app_.config['SEARCH_UI_SEARCH_INDEX'] = app_.config['SEARCH_INDEX_PREFIX'] + 'weko'
+    try:
+        FlaskCeleryExt(app_)
+        Menu(app_)
+        Babel(app_)
+        InvenioI18N(app_)
+        InvenioDB(app_)
+        InvenioDeposit(app_)
+        InvenioAccounts(app_)
+        InvenioAssets(app_)
+        InvenioAccess(app_)
+        #InvenioAdmin(app_)
+        InvenioCache(app_)
+        InvenioSearch(app_)
+        InvenioRecords(app_)
+        InvenioIndexer(app_)
+        InvenioOAIServer(app_)
+        InvenioFilesREST(app_)
+        InvenioCommunities(app_)
+        InvenioMail(app_)
 
-    app_.register_blueprint(ui_blueprint)
-    app_.register_blueprint(api_blueprint, url_prefix='/api/communities')
+        app_.register_blueprint(ui_blueprint)
+        app_.register_blueprint(api_blueprint, url_prefix='/api/communities')
 
-    return app_
+        yield app_
+    finally:
+        try:
+            redis = StrictRedis(host=app_.config['CACHE_REDIS_HOST'], port=int(app_.config['REDIS_PORT']), db=11)
+            try:
+                prefixes = [app_.config['CACHE_KEY_PREFIX']] + [
+                    prefix + namespace + '_' for prefix in (
+                        'index_tree_view_', 'index_reset_tree_view_', 'index_reset_tree_ignore_more_view_')]
+                for prefix in prefixes:
+                    keys = list(redis.scan_iter(match=prefix + '*'))
+                    if keys:
+                        redis.delete(*keys)
+            finally:
+                redis.close()
+        finally:
+            if 'sqlalchemy' in app_.extensions:
+                with app_.app_context():
+                    db_.session.remove()
+                    db_.engine.dispose()
 
-@pytest.yield_fixture()
+
+@pytest.fixture()
 def app(base_app):
     with base_app.app_context():
         yield base_app
 
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def db(app):
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    database_url = db_.engine.url
+    if database_exists(database_url):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
 
 
 @pytest.fixture()
@@ -293,9 +359,9 @@ def users(app, db):
 
 
 @pytest.fixture()
-def location(app,db):
+def location(app,db,instance_path):
     """Create default location."""
-    tmppath = tempfile.mkdtemp()
+    tmppath = tempfile.mkdtemp(dir=instance_path)
     with db.session.begin_nested():
         Location.query.delete()
         loc = Location(name='local', uri=tmppath, default=True)
@@ -336,7 +402,7 @@ def script_info(app):
     """Get ScriptInfo object for testing CLI."""
     return ScriptInfo(create_app=lambda info: app)
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def disable_request_email(app):
     """Fixture for disabling request emails."""
     orig = app.config['COMMUNITIES_MAIL_ENABLED']
@@ -377,7 +443,7 @@ def communities_for_filtering(app, db, user):
                              group_id=r.id)
     return comm0, comm1, comm2
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def client(app):
     with app.test_client() as client:
         yield client
@@ -441,3 +507,9 @@ def db_records(app,db):
         recid, depid, record, item, parent, doi, deposit = create_record(db, record_datas[0], item_datas[0])
 
     return recid, depid, record, item, parent, doi, deposit
+
+
+@pytest.fixture
+def acl_admin(app, db):
+    """Use the real protected-view factory for authenticated ACL cases."""
+    return InvenioAdmin(app, entry_point_group=None)
