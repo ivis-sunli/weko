@@ -55,7 +55,13 @@ from invenio_records import InvenioRecords
 from invenio_records_ui import InvenioRecordsUI
 from invenio_search import InvenioSearch, current_search_client
 from invenio_theme import InvenioTheme
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
+from redis import StrictRedis
 
 from weko_accounts import WekoAccounts
 from weko_admin import WekoAdmin
@@ -83,12 +89,16 @@ from .helpers import json_data, create_record
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 @pytest.fixture
-def base_app(instance_path):
+def base_app(instance_path, monkeypatch, versioning_listeners):
     """Flask application fixture."""
+    namespace = 'sword_ut_' + uuid.uuid4().hex
+    monkeypatch.setenv('INVENIO_WEB_HOST_NAME', namespace)
     app_ = Flask(
         "testapp",
         instance_path=instance_path,
@@ -98,26 +108,27 @@ def base_app(instance_path):
         TESTING=True,
         SECRET_KEY='testing_key',
         SERVER_NAME='TEST_SERVER.localdomain',
-        SQLALCHEMY_DATABASE_URI=os.getenv(
-            'SQLALCHEMY_DATABASE_URI',
-            'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(database=namespace),
         OAUTH2_CACHE_TYPE='simple',
         OAUTHLIB_INSECURE_TRANSPORT=True,
         SEARCH_OPENSEARCH_HOSTS=os.environ.get("SEARCH_OPENSEARCH_HOSTS", "opensearch"),
         SEARCH_HOSTS=os.environ.get('SEARCH_HOST', 'opensearch'),
         SEARCH_CLIENT_CONFIG={"http_auth":(os.environ['INVENIO_OPENSEARCH_USER'],os.environ['INVENIO_OPENSEARCH_PASS']),"use_ssl":True, "verify_certs":False},
         CACHE_TYPE="redis",
-        CACHE_REDIS_URL="redis://redis:6379/0",
-        CACHE_REDIS_DB="0",
+        CACHE_REDIS_URL="redis://redis:6379/12",
+        CACHE_REDIS_DB="12",
+        CACHE_KEY_PREFIX=namespace + ":",
         CACHE_REDIS_HOST="redis",
         REDIS_PORT="6379",
         WEKO_BUCKET_QUOTA_SIZE = 50 * 1024 * 1024 * 1024,
         WEKO_MAX_FILE_SIZE=50 * 1024 * 1024 * 1024,
         WEKO_MAX_FILE_SIZE_FOR_ES = 1 * 1024 * 1024,
         DEPOSIT_DEFAULT_JSONSCHEMA = 'deposits/deposit-v1.0.0.json',
-        SEARCH_UI_SEARCH_INDEX="test-weko",
+        SEARCH_INDEX_PREFIX="",
+        SEARCH_UI_SEARCH_INDEX=namespace + "-weko",
+        WEKO_AUTHORS_SEARCH_INDEX_NAME=namespace + "-weko-author",
         INDEXER_FILE_DOC_TYPE="content",
-        INDEXER_DEFAULT_INDEX="{}-weko-item-v1.0.0".format("test"),
+        INDEXER_DEFAULT_INDEX=namespace + "-weko-item-v1.0.0",
         WEKO_SCHEMA_JPCOAR_V1_SCHEMA_NAME = 'jpcoar_v1_mapping',
         WEKO_SCHEMA_JPCOAR_V2_SCHEMA_NAME='jpcoar_mapping',
         WEKO_SCHEMA_DDI_SCHEMA_NAME='ddi_mapping',
@@ -141,44 +152,64 @@ def base_app(instance_path):
             'application/pdf',
         ]
     )
-    Babel(app_)
-    Mail(app_)
-    # Menu(app_)
-    InvenioDB(app_)
-    InvenioI18N(app_)
-    InvenioAccess(app_)
-    InvenioAccounts(app_)
-    InvenioAdmin(app_)
-    InvenioAssets(app_)
-    InvenioCache(app_)
-    InvenioDeposit(app_)
-    InvenioFilesREST(app_)
-    InvenioJSONSchemas(app_)
-    InvenioOAuth2Server(app_)
-    InvenioRecords(app_)
-    InvenioSearch(app_)
-    InvenioTheme(app_)
-    InvenioPIDRelations(app_)
-    InvenioPIDStore(app_)
-    WekoAccounts(app_)
-    WekoSearchUI(app_)
-    WekoWorkflow(app_)
-    WekoAdmin(app_)
-    WekoAuthors(app_)
-    WekoDeposit(app_)
-    WekoIndexTree(app_)
-    WekoItemsUI(app_)
-    WekoSchemaUI(app_)
-    WekoTheme(app_)
-    WekoLoggingUserActivity(app_)
+    try:
+        Babel(app_)
+        Mail(app_)
+        # Menu(app_)
+        InvenioDB(app_)
+        InvenioI18N(app_)
+        InvenioAccess(app_)
+        InvenioAccounts(app_)
+        InvenioAdmin(app_)
+        InvenioAssets(app_)
+        InvenioCache(app_)
+        InvenioDeposit(app_)
+        InvenioFilesREST(app_)
+        InvenioJSONSchemas(app_)
+        InvenioOAuth2Server(app_)
+        InvenioRecords(app_)
+        InvenioSearch(app_)
+        InvenioTheme(app_)
+        InvenioPIDRelations(app_)
+        InvenioPIDStore(app_)
+        WekoAccounts(app_)
+        WekoSearchUI(app_)
+        WekoWorkflow(app_)
+        WekoAdmin(app_)
+        WekoAuthors(app_)
+        WekoDeposit(app_)
+        WekoIndexTree(app_)
+        WekoItemsUI(app_)
+        WekoSchemaUI(app_)
+        WekoTheme(app_)
+        WekoLoggingUserActivity(app_)
 
-    # InvenioCommunities(app_)
-    app_.register_blueprint(invenio_communities_blueprint)
+        # InvenioCommunities(app_)
+        app_.register_blueprint(invenio_communities_blueprint)
 
-    current_assets = LocalProxy(lambda: app_.extensions["invenio-assets"])
-    current_assets.collect.collect()
+        current_assets = LocalProxy(lambda: app_.extensions["invenio-assets"])
+        current_assets.collect.collect()
 
-    yield app_
+        yield app_
+    finally:
+        try:
+            redis = StrictRedis(host=app_.config['CACHE_REDIS_HOST'], port=int(app_.config['REDIS_PORT']), db=12)
+            try:
+                prefixes = [app_.config['CACHE_KEY_PREFIX']] + [
+                    prefix + namespace + '_' for prefix in (
+                        'index_tree_view_', 'index_reset_tree_view_', 'index_reset_tree_ignore_more_view_')]
+                for prefix in prefixes:
+                    keys = list(redis.scan_iter(match=prefix + '*'))
+                    if keys:
+                        redis.delete(*keys)
+            finally:
+                redis.close()
+        finally:
+            if 'sqlalchemy' in app_.extensions:
+                with app_.app_context():
+                    db_.session.remove()
+                    db_.engine.dispose()
+
 
 @pytest.fixture
 def app(base_app):
@@ -195,54 +226,39 @@ def client(app):
 
 @pytest.fixture
 def search_index(app):
-    app.config.update(
-        WEKO_AUTHORS_SEARCH_INDEX_NAME="test-weko-author"
-    )
-    current_search_client.indices.delete(index="test-*")
-    mapping_author = json_data("data/author-v1.0.0.json")
+    indices = [app.config['WEKO_AUTHORS_SEARCH_INDEX_NAME'], app.config['INDEXER_DEFAULT_INDEX']]
+    aliases = [app.config['WEKO_AUTHORS_SEARCH_INDEX_NAME'] + 's', app.config['SEARCH_UI_SEARCH_INDEX']]
+    mappings = [json_data('data/author-v1.0.0.json'), json_data('data/item-v1.0.0.json')]
+    created = []
+    for name in indices + aliases:
+        if current_search_client.indices.exists(index=name):
+            raise RuntimeError('Refusing to reuse an existing test index or alias')
     try:
-        current_search_client.indices.create(
-            app.config["WEKO_AUTHORS_SEARCH_INDEX_NAME"], body=mapping_author
-        )
-        current_search_client.indices.put_alias(
-            index=app.config["WEKO_AUTHORS_SEARCH_INDEX_NAME"],name="test-weko-authors"
-        )
-    except:
-        current_search_client.indices.create("test-weko-author", body=mapping_author)
-        current_search_client.indices.put_alias(
-            index="test-weko-author", name="test-weko-authors"
-        )
-
-    mapping_item = json_data("data/item-v1.0.0.json")
-    try:
-        current_search_client.indices.create(
-            app.config["INDEXER_DEFAULT_INDEX"], body=mapping_item
-        )
-        current_search_client.indices.put_alias(
-            index=app.config["INDEXER_DEFAULT_INDEX"], name="test-weko"
-        )
-    except:
-        current_search_client.indices.create("test-weko-item-v1.0.0", body=mapping_item)
-        current_search_client.indices.put_alias(
-            index="test-weko-item-v1.0.0", name="test-weko"
-        )
-
-    try:
+        for index, alias, mapping in zip(indices, aliases, mappings):
+            current_search_client.indices.create(index=index, body=mapping)
+            created.append(index)
+            current_search_client.indices.put_alias(index=index, name=alias)
         yield current_search_client
     finally:
-        current_search_client.indices.delete(index="test-*")
+        for index in reversed(created):
+            current_search_client.indices.delete(index=index)
 
 
 @pytest.fixture
 def db(app):
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
-    # drop_database(str(db_.engine.url))
+    database_url = db_.engine.url
+    if database_exists(database_url):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
+
 
 @pytest.fixture
 def tokens(app,users,db):
@@ -574,7 +590,7 @@ def index(app, db):
 @pytest.fixture
 def location(app,db):
     """Create default location."""
-    tmppath = tempfile.mkdtemp()
+    tmppath = tempfile.mkdtemp(dir=app.instance_path)
     with db.session.begin_nested():
         Location.query.delete()
         loc = Location(name='local', uri=tmppath, default=True)
@@ -647,9 +663,9 @@ def make_zip():
     return factory
 
 @pytest.fixture
-def make_crate():
+def make_crate(instance_path):
     def factory():
-        temp_dir = tempfile.mkdtemp()
+        temp_dir = tempfile.mkdtemp(dir=instance_path)
         zip_path = os.path.join(temp_dir, "crate.zip")
         shutil.make_archive(zip_path.replace(".zip", ""), 'zip', "tests/data/zip_crate/")
         file_size = os.path.getsize(zip_path)
@@ -661,9 +677,9 @@ def make_crate():
     return factory
 
 @pytest.fixture
-def make_crate2():
+def make_crate2(instance_path):
     def factory():
-        temp_dir = tempfile.mkdtemp()
+        temp_dir = tempfile.mkdtemp(dir=instance_path)
         zip_path = os.path.join(temp_dir, "crate.zip")
         shutil.make_archive(zip_path.replace(".zip", ""), 'zip', "tests/data/zip_crate2/")
         file_size = os.path.getsize(zip_path)
@@ -983,3 +999,30 @@ def sword_client(db, tokens, sword_mapping, workflow):
         {"sword_client": sword_client2},
         {"sword_client": sword_client3}
     ]
+
+
+@pytest.fixture
+def versioning_listeners():
+    """Release only the versioning listeners installed by this application."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
