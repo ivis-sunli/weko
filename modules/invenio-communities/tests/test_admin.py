@@ -84,12 +84,17 @@ def setup_view_community(app,db,users,mock_role):
     db.session.commit()
 
 
-    admin = Admin(app)
+    state = app.extensions.get('invenio-admin')
+    admin = state.admin if state else Admin(app)
     community_adminview_copy = dict(community_adminview)
     community_model = community_adminview_copy.pop("model")
     community_view = community_adminview_copy.pop("modelview")
-    view = community_view(community_model,db.session,**community_adminview_copy)
-    admin.add_view(view)
+    if state:
+        state.register_view(community_view, community_model, db.session, **community_adminview_copy)
+        view = admin._views[-1]
+    else:
+        view = community_view(community_model,db.session,**community_adminview_copy)
+        admin.add_view(view)
     return app, db, admin, sysadmin, view
 
 # def _(x):
@@ -146,12 +151,12 @@ class TestCommunityModelView():
         (7, 403), # no role
     ],
     )
+    @pytest.mark.usefixtures("acl_admin")
     def test_index_view_acl(self,app,client,setup_view_community,users,id,status_code):
         url = url_for('community.index_view')
-        with patch("flask_login.utils._get_user", return_value=users[id]["obj"]):
-            # login_user_via_session(client,email=users[id]["email"])
-            res = client.get(url)
-            assert res.status_code == status_code
+        login_user_via_session(client,email=users[id]["email"])
+        res = client.get(url)
+        assert res.status_code == status_code
 
     # def on_model_change(self, form, model, is_created):
     # def _validate_input_id(self, field):
@@ -999,13 +1004,13 @@ class TestFeaturedCommunityModelView():
         (7, 403), # no role
     ],
     )
+    @pytest.mark.usefixtures("acl_admin")
     def test_index_view_acl(self,app,db,client,users,id,status_code):
-        admin = Admin(app)
+        state = app.extensions['invenio-admin']
         featured_adminview_copy = dict(featured_adminview)
         featured_model = featured_adminview_copy.pop("model")
         featured_view = featured_adminview_copy.pop("modelview")
-        view = featured_view(featured_model,db.session,**featured_adminview_copy)
-        admin.add_view(view)
+        state.register_view(featured_view, featured_model, db.session, **featured_adminview_copy)
         url = url_for('featuredcommunity.index_view')
         login_user_via_session(client,email=users[id]["email"])
         res = client.get(url)
@@ -1040,13 +1045,13 @@ class TestInclusionRequestModelView():
         (7, 403), # no role
     ],
     )
+    @pytest.mark.usefixtures("acl_admin")
     def test_index_view_acl(self,app,client,db,users,id,status_code):
-        admin = Admin(app)
+        state = app.extensions['invenio-admin']
         request_adminview_copy = dict(request_adminview)
         request_model = request_adminview_copy.pop("model")
         request_view = request_adminview_copy.pop("modelview")
-        view = request_view(request_model,db.session,**request_adminview_copy)
-        admin.add_view(view)
+        state.register_view(request_view, request_model, db.session, **request_adminview_copy)
 
         url = url_for('inclusionrequest.index_view')
         login_user_via_session(client,email=users[id]["email"])
