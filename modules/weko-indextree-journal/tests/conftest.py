@@ -17,6 +17,7 @@ import json
 import pytest
 import shutil
 import tempfile
+import uuid
 
 from datetime import date, datetime, timedelta
 from flask import Flask
@@ -33,7 +34,13 @@ from invenio_db import db as db_
 from invenio_i18n import InvenioI18N
 from invenio_oaiserver import InvenioOAIServer
 from os.path import dirname, exists, join
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
+from redis import StrictRedis
 from weko_records import WekoRecords
 from weko_records.models import ItemType, ItemTypeMapping, ItemTypeName
 from weko_index_tree.models import Index
@@ -50,15 +57,19 @@ from weko_indextree_journal.rest import create_blueprint
 sys.path.append(os.path.dirname(__file__))
 
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def instance_path():
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 
 @pytest.fixture()
-def base_app(request,instance_path):
+def base_app(request, instance_path, monkeypatch, versioning_listeners, export_workdir):
+    namespace = 'journal_ut_' + uuid.uuid4().hex
+    monkeypatch.setenv('INVENIO_WEB_HOST_NAME', namespace)
     app_ = Flask(
         "testapp",
         instance_path=instance_path,
@@ -69,8 +80,9 @@ def base_app(request,instance_path):
         CELERY_CACHE_BACKEND="memory",
         CELERY_EAGER_PROPAGATES_EXCEPTIONS=True,
         CELERY_RESULT_BACKEND="cache",
-        CACHE_REDIS_URL=os.environ.get("CACHE_REDIS_URL", "redis://redis:6379/0"),
-        CACHE_REDIS_DB=0,
+        CACHE_REDIS_URL="redis://redis:6379/14",
+        CACHE_REDIS_DB=14,
+        CACHE_KEY_PREFIX=namespace + ":",
         CACHE_REDIS_HOST="redis",
         REDIS_PORT="6379",
         JSONSCHEMAS_URL_SCHEME="http",
@@ -79,8 +91,7 @@ def base_app(request,instance_path):
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #     "SQLALCHEMY_DATABASE_URI", "sqlite:///test.db"
         # ),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                           'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(database=namespace),
         SQLALCHEMY_TRACK_MODIFICATIONS=True,
         SQLALCHEMY_ECHO=False,
         TESTING=True,
@@ -92,7 +103,7 @@ def base_app(request,instance_path):
         OAUTHLIB_INSECURE_TRANSPORT=True,
         OAUTH2_CACHE_TYPE="simple",
         ACCOUNTS_JWT_ENABLE=False,
-        INDEXER_DEFAULT_INDEX="{}-weko-item-v1.0.0".format("test"),
+        INDEXER_DEFAULT_INDEX=namespace + "-weko-item-v1.0.0",
         INDEXER_FILE_DOC_TYPE="content",
         WEKO_INDEX_TREE_STYLE_OPTIONS={
             "id": "weko",
@@ -102,7 +113,7 @@ def base_app(request,instance_path):
         I18N_LANGUAGES=[("ja", "Japanese"), ("en", "English")],
         SERVER_NAME="TEST_SERVER",
         SEARCH_OPENSEARCH_HOSTS="opensearch",
-        SEARCH_INDEX_PREFIX="test-",
+        SEARCH_INDEX_PREFIX=namespace + "-",
         WEKO_PERMISSION_ROLE_USER=[
             "System Administrator",
             "Repository Administrator",
@@ -135,40 +146,59 @@ def base_app(request,instance_path):
             app_.config["WEKO_INDEXTREE_JOURNAL_REST_ENDPOINTS"]["tid"].update(
                 request.param["endpoint"]
             )
-    Babel(app_)
-    InvenioAccounts(app_)
-    InvenioAccess(app_)
-    InvenioDB(app_)
-    InvenioAdmin(app_)
-    InvenioI18N(app_)
-    InvenioOAIServer(app_)
-    WekoRecords(app_)
-    WekoWorkflow(app_)
-    WekoIndexTree(app_)
-#   WekoItemsUI(app_)
-    WekoIndextreeJournal(app_)
-    WekoIndextreeJournalREST(app_)
+    try:
+        Babel(app_)
+        InvenioAccounts(app_)
+        InvenioAccess(app_)
+        InvenioDB(app_)
+        InvenioAdmin(app_)
+        InvenioI18N(app_)
+        InvenioOAIServer(app_)
+        WekoRecords(app_)
+        WekoWorkflow(app_)
+        WekoIndexTree(app_)
+    #   WekoItemsUI(app_)
+        WekoIndextreeJournal(app_)
+        WekoIndextreeJournalREST(app_)
 
-    return app_
+        yield app_
+    finally:
+        try:
+            redis = StrictRedis(host=app_.config['CACHE_REDIS_HOST'], port=int(app_.config['REDIS_PORT']), db=14)
+            try:
+                prefixes = [app_.config['CACHE_KEY_PREFIX']] + [
+                    prefix + namespace + '_' for prefix in (
+                        'index_tree_view_', 'index_reset_tree_view_', 'index_reset_tree_ignore_more_view_')]
+                for prefix in prefixes:
+                    keys = list(redis.scan_iter(match=prefix + '*'))
+                    if keys:
+                        redis.delete(*keys)
+            finally:
+                redis.close()
+        finally:
+            if 'sqlalchemy' in app_.extensions:
+                with app_.app_context():
+                    db_.session.remove()
+                    db_.engine.dispose()
 
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def app(base_app):
     with base_app.app_context():
         yield base_app
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def client(app):
     with app.test_client() as client:
         yield client
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def client_rest(app):
     with app.test_client() as client:
         yield client
 
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def i18n_app(app):
     with app.test_request_context(
         headers=[('Accept-Language','ja')]):
@@ -178,12 +208,17 @@ def i18n_app(app):
 
 @pytest.fixture()
 def db(app):
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    database_url = db_.engine.url
+    if database_exists(database_url):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
 
 
 @pytest.fixture()
@@ -385,19 +420,19 @@ def db_itemtype(app, db):
         id=1, name="テストアイテムタイプ", has_site_license=True, is_active=True
     )
     item_type_schema = dict()
-    with open("tests/data/itemtype_schema.json", "r") as f:
+    with open(join(dirname(__file__), "data", "itemtype_schema.json"), "r") as f:
         item_type_schema = json.load(f)
 
     item_type_form = dict()
-    with open("tests/data/itemtype_form.json", "r") as f:
+    with open(join(dirname(__file__), "data", "itemtype_form.json"), "r") as f:
         item_type_form = json.load(f)
 
     item_type_render = dict()
-    with open("tests/data/itemtype_render.json", "r") as f:
+    with open(join(dirname(__file__), "data", "itemtype_render.json"), "r") as f:
         item_type_render = json.load(f)
 
     item_type_mapping = dict()
-    with open("tests/data/itemtype_mapping.json", "r") as f:
+    with open(join(dirname(__file__), "data", "itemtype_mapping.json"), "r") as f:
         item_type_mapping = json.load(f)
 
     item_type = ItemType(
@@ -477,3 +512,38 @@ def indices(app, db):
         "index_non_dict": testIndexThree,
         "index_non_dict_child": testIndexThreeChild,
     }
+
+
+@pytest.fixture
+def export_workdir(instance_path, monkeypatch):
+    path = join(instance_path, 'work')
+    os.mkdir(path)
+    monkeypatch.chdir(path)
+    return path
+
+
+@pytest.fixture
+def versioning_listeners():
+    """Release only the versioning listeners installed by this application."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
