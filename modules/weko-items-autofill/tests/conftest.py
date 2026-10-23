@@ -15,6 +15,7 @@ import os
 import pytest
 import shutil
 import tempfile
+import uuid
 
 from flask import Flask
 from flask_babel import Babel
@@ -32,12 +33,19 @@ from invenio_db import InvenioDB
 from invenio_db import db as db_
 from invenio_files_rest.models import Location
 from invenio_oauth2server import InvenioOAuth2Server
-from sqlalchemy_utils.functions import create_database, database_exists
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
+from sqlalchemy_utils.functions import create_database, database_exists, drop_database
+from redis import StrictRedis
 from tests.helpers import json_data, create_record
 
 from weko_admin.models import ApiCertificate
 from weko_index_tree.models import Index
 from weko_items_autofill import WekoItemsAutofill
+from weko_items_autofill.api import CrossRefOpenURL, CiNiiURL
 from weko_items_ui.config import WEKO_ITEMS_UI_CRIS_LINKAGE_RESEARCHMAP_MAPPINGS,WEKO_ITEMS_UI_CRIS_LINKAGE_RESEARCHMAP_TYPE_MAPPINGS
 from weko_search_ui.config import INDEXER_FILE_DOC_TYPE
 from weko_records.models import ItemType, ItemTypeMapping, ItemTypeName
@@ -56,12 +64,14 @@ def celery_config():
     return {}
 
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
 
 
 @pytest.fixture()
@@ -80,7 +90,9 @@ def create_app(instance_path):
 
 
 @pytest.fixture()
-def base_app(instance_path):
+def base_app(instance_path, monkeypatch, versioning_listeners):
+    namespace = 'autofill_ut_' + uuid.uuid4().hex
+    monkeypatch.setenv('INVENIO_WEB_HOST_NAME', namespace)
     app_ = Flask('testapp', instance_path=instance_path)
     app_.config.update(
         SECRET_KEY='SECRET_KEY',
@@ -89,14 +101,13 @@ def base_app(instance_path):
         TESTING=True,
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #     'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                           'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
-        CACHE_REDIS_URL=os.environ.get(
-            "CACHE_REDIS_URL", "redis://redis:6379/0"
-        ),
-        CACHE_REDIS_DB='0',
+        SQLALCHEMY_DATABASE_URI=make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(database=namespace),
+        CACHE_REDIS_URL='redis://redis:6379/15',
+        CACHE_REDIS_DB='15',
+        CACHE_KEY_PREFIX=namespace + ':',
+        REDIS_PORT='6379',
         CACHE_REDIS_HOST="redis",
-        SEARCH_UI_SEARCH_INDEX="test-weko",
+        SEARCH_UI_SEARCH_INDEX=namespace + "-weko",
         INDEXER_FILE_DOC_TYPE=INDEXER_FILE_DOC_TYPE,
         WEKO_PERMISSION_SUPER_ROLE_USER=[
             "System Administrator",
@@ -113,33 +124,52 @@ def base_app(instance_path):
         FILES_REST_DEFAULT_QUOTA_SIZE= None,
         FILES_REST_DEFAULT_MAX_FILE_SIZE= None,
     )
-    Babel(app_)
-    InvenioDB(app_)
-    InvenioAccounts(app_)
-    InvenioAccess(app_)
-    #search = InvenioSearch(app_)
-    InvenioCache(app_)
-    InvenioOAuth2Server(app_)
-    #WekoSearchUI(app_)
-    WekoRecordsUI(app_)
-    WekoItemsAutofill(app_)
-    InvenioI18N(app_),
-    return app_
+    try:
+        Babel(app_)
+        InvenioDB(app_)
+        InvenioAccounts(app_)
+        InvenioAccess(app_)
+        #search = InvenioSearch(app_)
+        InvenioCache(app_)
+        InvenioOAuth2Server(app_)
+        #WekoSearchUI(app_)
+        WekoRecordsUI(app_)
+        WekoItemsAutofill(app_)
+        InvenioI18N(app_),
+        yield app_
+    finally:
+        try:
+            redis = StrictRedis(host=app_.config['CACHE_REDIS_HOST'], port=int(app_.config['REDIS_PORT']), db=15)
+            try:
+                prefixes = [app_.config['CACHE_KEY_PREFIX']] + [
+                    prefix + namespace + '_' for prefix in (
+                        'index_tree_view_', 'index_reset_tree_view_', 'index_reset_tree_ignore_more_view_')]
+                for prefix in prefixes:
+                    keys = list(redis.scan_iter(match=prefix + '*'))
+                    if keys:
+                        redis.delete(*keys)
+            finally:
+                redis.close()
+        finally:
+            if 'sqlalchemy' in app_.extensions:
+                with app_.app_context():
+                    db_.session.remove()
+                    db_.engine.dispose()
 
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def app(base_app):
     with base_app.app_context():
         yield base_app
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def client(app):
     from weko_items_autofill.views import blueprint
     app.register_blueprint(blueprint)
     with app.test_client() as client:
         yield client
 
-@pytest.yield_fixture()
+@pytest.fixture()
 def client_api(app):
     from weko_items_autofill.views import blueprint_api
     app.register_blueprint(blueprint_api)
@@ -151,12 +181,18 @@ def client_api(app):
 @pytest.fixture()
 def db(app):
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    database_url = db_.engine.url
+    if database_exists(database_url):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
+
 
 @pytest.fixture()
 def users(app, db):
@@ -418,3 +454,37 @@ def api_certificate(db):
     db.session.add(api)
     db.session.commit()
     return api
+
+
+@pytest.fixture
+def versioning_listeners():
+    """Release only the versioning listeners installed by this application."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
+
+@pytest.fixture(autouse=True)
+def proxy_defaults(monkeypatch):
+    """Keep constructor proxy changes local to the current test."""
+    for client_class in (CrossRefOpenURL, CiNiiURL):
+        monkeypatch.setattr(client_class, '_proxy', client_class._proxy.copy())
