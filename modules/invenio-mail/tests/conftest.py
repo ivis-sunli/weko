@@ -12,6 +12,13 @@ import os
 import pytest
 import shutil
 import tempfile
+import uuid
+
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
+from sqlalchemy.orm import Mapper, Session
+from sqlalchemy_continuum import versioning_manager
 
 from datetime import datetime
 from flask import Blueprint, Flask
@@ -46,11 +53,40 @@ from weko_index_tree.models import Index
 def instance_path():
     """Temporary instance path."""
     path = tempfile.mkdtemp()
-    yield path
-    shutil.rmtree(path)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
+
+@pytest.fixture
+def versioning_listeners():
+    """Release only the versioning listeners installed by this application."""
+    registrations = [
+        (target, name, listener)
+        for target, listeners in (
+            (Session, versioning_manager.session_listeners),
+            (Mapper, versioning_manager.mapper_listeners),
+            (Mapper, versioning_manager.class_config_listeners),
+        )
+        for name, listener in listeners.items()
+    ]
+    registrations.extend([
+        (Engine, 'before_execute', versioning_manager.track_association_operations),
+        (Engine, 'rollback', versioning_manager.clear_connection),
+        (Engine, 'set_connection_execution_options', versioning_manager.track_cloned_connections),
+    ])
+    owned = [registration for registration in registrations
+             if not event.contains(*registration)]
+    try:
+        yield
+    finally:
+        for registration in reversed(owned):
+            if event.contains(*registration):
+                event.remove(*registration)
+
 
 @pytest.fixture()
-def base_app(instance_path):
+def base_app(instance_path, versioning_listeners):
     app_ = Flask('testapp', instance_path=instance_path)
     app_.config.update(
         SECRET_KEY='SECRET_KEY',
@@ -58,8 +94,8 @@ def base_app(instance_path):
         SERVER_NAME='app',
         # SQLALCHEMY_DATABASE_URI=os.environ.get(
         #      'SQLALCHEMY_DATABASE_URI', 'sqlite:///test.db'),
-        SQLALCHEMY_DATABASE_URI=os.getenv('SQLALCHEMY_DATABASE_URI',
-                                         'postgresql+psycopg2://invenio:dbpass123@postgresql:5432/wekotest'),
+        SQLALCHEMY_DATABASE_URI=make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+            database='mail_ut_' + uuid.uuid4().hex),
         WEKO_RECORDS_UI_MAIL_TEMPLATE_SECRET_GENRE_ID=1,
         WEKO_ADMIN_RESTRICTED_ACCESS_SETTINGS = {
             "secret_URL_file_download": {
@@ -92,21 +128,28 @@ def base_app(instance_path):
             }
         }
     )
-    Babel(app_)
-    InvenioDB(app_)
-    InvenioAccounts(app_)
-    InvenioAccess(app_)
-    InvenioI18N(app_)
-    InvenioMail(app_)
+    try:
+        Babel(app_)
+        InvenioDB(app_)
+        InvenioAccounts(app_)
+        InvenioAccess(app_)
+        InvenioI18N(app_)
+        InvenioMail(app_)
 
-    app_.jinja_loader.searchpath.append('tests/templates')
-    admin = Admin(app_)
-    view_class = mail_adminview['view_class']
-    view_class_template = mail_templates_adminview['view_class']
-    admin.add_view(view_class(**mail_adminview['kwargs']))
-    admin.add_view(view_class_template(**mail_templates_adminview['kwargs']))
+        app_.jinja_loader.searchpath.append('tests/templates')
+        admin = Admin(app_)
+        view_class = mail_adminview['view_class']
+        view_class_template = mail_templates_adminview['view_class']
+        admin.add_view(view_class(**mail_adminview['kwargs']))
+        admin.add_view(view_class_template(**mail_templates_adminview['kwargs']))
 
-    return app_
+        yield app_
+    finally:
+        if 'sqlalchemy' in app_.extensions:
+            with app_.app_context():
+                db_.session.remove()
+                db_.engine.dispose()
+
 
 @pytest.fixture()
 def app(base_app):
@@ -122,12 +165,17 @@ def client(app):
 @pytest.fixture()
 def db(app):
     """Database fixture."""
-    if not database_exists(str(db_.engine.url)):
-        create_database(str(db_.engine.url))
-    db_.create_all()
-    yield db_
-    db_.session.remove()
-    db_.drop_all()
+    database_url = db_.engine.url
+    if database_exists(database_url):
+        raise RuntimeError('Refusing to reuse an existing test database')
+    create_database(database_url)
+    try:
+        db_.create_all()
+        yield db_
+    finally:
+        db_.session.remove()
+        db_.engine.dispose()
+        drop_database(database_url)
 
 
 @pytest.fixture()
@@ -311,16 +359,14 @@ def mail_templates(db):
     return template
 
 @pytest.fixture()
-def email_admin_app():
+def email_admin_app(instance_path, versioning_listeners):
     """Flask application fixture."""
-    instance_path = tempfile.mkdtemp()
     base_app = Flask(__name__, instance_path=instance_path)
     base_app.config.update(
         SECRET_KEY='SECRET KEY',
         SESSION_TYPE='memcached',
-        SQLALCHEMY_DATABASE_URI=os.environ.get(
-            'SQLALCHEMY_DATABASE_URI',
-            'sqlite://'),
+        SQLALCHEMY_DATABASE_URI=make_url(os.environ['SQLALCHEMY_DATABASE_URI']).set(
+            database='mail_admin_ut_' + uuid.uuid4().hex),
     )
     InvenioDB(base_app)
     InvenioMail(base_app)
@@ -329,16 +375,19 @@ def email_admin_app():
     view_class = mail_adminview['view_class']
     admin.add_view(view_class(**mail_adminview['kwargs']))
     with base_app.app_context():
-        if str(db.engine.url) != "sqlite://" and \
-                not database_exists(str(db.engine.url)):
-            create_database(str(db.engine.url))
-        db.metadata.create_all(db.engine, tables=[MailConfig.__table__])
-
-    yield base_app
-
-    with base_app.app_context():
-        drop_database(str(db.engine.url))
-    shutil.rmtree(instance_path)
+        database_url = db_.engine.url
+        if database_exists(database_url):
+            raise RuntimeError('Refusing to reuse an existing test database')
+        create_database(database_url)
+    try:
+        with base_app.app_context():
+            db_.metadata.create_all(db_.engine, tables=[MailConfig.__table__])
+        yield base_app
+    finally:
+        with base_app.app_context():
+            db_.session.remove()
+            db_.engine.dispose()
+            drop_database(database_url)
 
 @pytest.fixture(scope="session")
 def email_task_app(request):
